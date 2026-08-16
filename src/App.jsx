@@ -3,8 +3,29 @@ import { Lock, User, Check, X, ShieldCheck, Upload, Users, BarChart3, LogOut, Vo
 import { storageGet, storageSet } from "./storage.js";
 
 // ---------- Constants ----------
-const ADMIN_PASSWORD = "Wickedsmile"; // change this before sharing the real link
+const ADMIN_PASSWORD = "nacos-admin-2026"; // change this before sharing the real link
 const MAX_IMAGE_BYTES = 3 * 1024 * 1024; // 3MB upload cap for candidate photos
+const SESSION_KEY = "nacos_session_v1";
+const IDLE_LIMIT_MS = 5 * 60 * 1000; // auto-logout after 5 minutes of inactivity
+
+function loadSession() {
+  try {
+    const raw = window.localStorage.getItem(SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+function saveSession(session) {
+  try {
+    window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  } catch (e) {}
+}
+function clearSession() {
+  try {
+    window.localStorage.removeItem(SESSION_KEY);
+  } catch (e) {}
+}
 
 // Names pulled from the department's ND1 (25-series) and ND2 (24-series) class lists.
 // Blank string = no name on record yet for that matric number.
@@ -184,6 +205,7 @@ export default function App() {
   const [ballot, setBallot] = useState({ votes: {}, records: {} }); // votes: {candId:{yes,no}}, records: {matric:[candId,...]}
 
   const [currentVoter, setCurrentVoter] = useState(null);
+  const [sessionNotice, setSessionNotice] = useState("");
 
   // init load
   useEffect(() => {
@@ -201,8 +223,55 @@ export default function App() {
       setCandidates(c);
       setBallot(b);
       setLoading(false);
+
+      const session = loadSession();
+      if (session && Date.now() - session.lastActivity < IDLE_LIMIT_MS) {
+        if (session.type === "admin") {
+          setScreen("admin");
+        } else if (session.type === "voter") {
+          const voter = v.find((x) => x.matric === session.matric);
+          if (voter) {
+            setCurrentVoter(voter);
+            setScreen("vote");
+          } else {
+            clearSession();
+          }
+        }
+      } else if (session) {
+        clearSession();
+      }
     })();
   }, []);
+
+  // auto-logout after 5 minutes of inactivity, while logged in as voter or admin
+  useEffect(() => {
+    if (screen !== "vote" && screen !== "admin") return;
+
+    function touchActivity() {
+      const session = loadSession();
+      if (session) {
+        session.lastActivity = Date.now();
+        saveSession(session);
+      }
+    }
+    const events = ["click", "keydown", "touchstart", "scroll"];
+    events.forEach((e) => window.addEventListener(e, touchActivity));
+
+    const interval = setInterval(() => {
+      const session = loadSession();
+      if (!session || Date.now() - session.lastActivity >= IDLE_LIMIT_MS) {
+        clearSession();
+        setCurrentVoter(null);
+        setSessionNotice("You were logged out after 5 minutes of inactivity.");
+        setScreen("landing");
+      }
+    }, 15000);
+
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, touchActivity));
+      clearInterval(interval);
+    };
+  }, [screen]);
 
   const refreshAll = useCallback(async () => {
     const [v, c, b] = await Promise.all([
@@ -218,6 +287,7 @@ export default function App() {
   // ---------- Voter login ----------
   function handleVoterLogin(matricRaw, password) {
     setError("");
+    setSessionNotice("");
     const matric = matricRaw.trim().toUpperCase();
     const voter = voters.find((x) => x.matric.toUpperCase() === matric);
     if (!voter) {
@@ -230,11 +300,12 @@ export default function App() {
     }
     setCurrentVoter(voter);
     setScreen("vote");
+    saveSession({ type: "voter", matric: voter.matric, lastActivity: Date.now() });
   }
 
   async function castVote(candidateId, choice) {
     if (!currentVoter) return;
-    const alreadyVoted = (ballot.records[currentVoter.matric] || []).includes(candidateId);
+    const alreadyVoted = !!(ballot.records[currentVoter.matric] || {})[candidateId];
     if (alreadyVoted) return;
 
     const fresh = (await storageGet("ballot", true)) || ballot;
@@ -242,7 +313,7 @@ export default function App() {
     const cv = votes[candidateId] || { yes: 0, no: 0 };
     votes[candidateId] = { ...cv, [choice]: (cv[choice] || 0) + 1 };
     const records = { ...fresh.records };
-    records[currentVoter.matric] = [...(records[currentVoter.matric] || []), candidateId];
+    records[currentVoter.matric] = { ...(records[currentVoter.matric] || {}), [candidateId]: choice };
 
     const updated = { votes, records };
     setBallot(updated);
@@ -252,11 +323,13 @@ export default function App() {
   // ---------- Admin login ----------
   function handleAdminLogin(password) {
     setError("");
+    setSessionNotice("");
     if (password !== ADMIN_PASSWORD) {
       setError("Incorrect admin password.");
       return;
     }
     setScreen("admin");
+    saveSession({ type: "admin", lastActivity: Date.now() });
   }
 
   if (loading) {
@@ -269,7 +342,13 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0B1220] text-slate-100 font-sans">
-      {screen === "landing" && <Landing onVoter={() => setScreen("voter-login")} onAdmin={() => setScreen("admin-login")} />}
+      {screen === "landing" && (
+        <Landing
+          onVoter={() => { setSessionNotice(""); setScreen("voter-login"); }}
+          onAdmin={() => { setSessionNotice(""); setScreen("admin-login"); }}
+          notice={sessionNotice}
+        />
+      )}
       {screen === "voter-login" && (
         <VoterLogin
           onSubmit={handleVoterLogin}
@@ -283,7 +362,7 @@ export default function App() {
           candidates={candidates}
           ballot={ballot}
           onVote={castVote}
-          onLogout={() => { setCurrentVoter(null); setScreen("landing"); }}
+          onLogout={() => { clearSession(); setCurrentVoter(null); setScreen("landing"); }}
         />
       )}
       {screen === "admin-login" && (
@@ -296,8 +375,9 @@ export default function App() {
           candidates={candidates}
           setCandidates={setCandidates}
           ballot={ballot}
+          setBallot={setBallot}
           refreshAll={refreshAll}
-          onLogout={() => setScreen("landing")}
+          onLogout={() => { clearSession(); setScreen("landing"); }}
         />
       )}
     </div>
@@ -305,7 +385,7 @@ export default function App() {
 }
 
 // ---------- Landing ----------
-function Landing({ onVoter, onAdmin }) {
+function Landing({ onVoter, onAdmin, notice }) {
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-6">
       <div className="max-w-md w-full text-center">
@@ -313,7 +393,10 @@ function Landing({ onVoter, onAdmin }) {
           <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" /> FEDPOLY Ado-Ekiti · NACOS
         </div>
         <h1 className="text-4xl font-bold tracking-tight text-slate-50 mb-2">Electoral Commission</h1>
-        <p className="text-slate-400 mb-10">Cast your vote for the departmental executive elections. One matric number, one voice per post.</p>
+        <p className="text-slate-400 mb-6">Cast your vote for the departmental executive elections. One matric number, one voice per post.</p>
+        {notice && (
+          <p className="text-amber-300 text-sm mb-6 bg-amber-500/10 border border-amber-500/30 rounded-md px-3 py-2">{notice}</p>
+        )}
         <div className="flex flex-col gap-3">
           <Button variant="primary" className="w-full flex items-center justify-center gap-2 py-3" onClick={onVoter}>
             <Vote size={18} /> Vote with your Matric Number
@@ -377,7 +460,7 @@ function AdminLogin({ onSubmit, onBack, error }) {
 // ---------- Vote Screen ----------
 function VoteScreen({ voter, candidates, ballot, onVote, onLogout }) {
   const posts = [...new Set(candidates.map((c) => c.post))];
-  const votedFor = ballot.records[voter.matric] || [];
+  const votedFor = ballot.records[voter.matric] || {};
 
   return (
     <div className="min-h-screen px-5 py-8 max-w-3xl mx-auto">
@@ -402,7 +485,7 @@ function VoteScreen({ voter, candidates, ballot, onVote, onLogout }) {
           <h2 className="text-sm font-mono uppercase tracking-[0.2em] text-cyan-400/80 mb-3 border-b border-slate-800 pb-2">{post}</h2>
           <div className="grid sm:grid-cols-2 gap-5">
             {candidates.filter((c) => c.post === post).map((c) => {
-              const voted = votedFor.includes(c.id);
+              const voted = !!votedFor[c.id];
               return (
                 <div key={c.id} className="bg-[#121A2B] border-2 border-slate-700 rounded-xl overflow-hidden">
                   <div className="aspect-square bg-slate-800 flex items-center justify-center overflow-hidden">
@@ -441,7 +524,7 @@ function VoteScreen({ voter, candidates, ballot, onVote, onLogout }) {
 }
 
 // ---------- Admin Dashboard ----------
-function AdminDashboard({ voters, setVoters, candidates, setCandidates, ballot, refreshAll, onLogout }) {
+function AdminDashboard({ voters, setVoters, candidates, setCandidates, ballot, setBallot, refreshAll, onLogout }) {
   const [tab, setTab] = useState("results"); // results | candidates | voters
 
   return (
@@ -474,21 +557,48 @@ function AdminDashboard({ voters, setVoters, candidates, setCandidates, ballot, 
         ))}
       </div>
 
-      {tab === "results" && <ResultsTab voters={voters} candidates={candidates} ballot={ballot} refreshAll={refreshAll} />}
+      {tab === "results" && <ResultsTab voters={voters} candidates={candidates} ballot={ballot} setBallot={setBallot} refreshAll={refreshAll} />}
       {tab === "candidates" && <CandidatesTab candidates={candidates} setCandidates={setCandidates} />}
-      {tab === "voters" && <VotersTab voters={voters} setVoters={setVoters} />}
+      {tab === "voters" && <VotersTab voters={voters} setVoters={setVoters} ballot={ballot} setBallot={setBallot} />}
     </div>
   );
 }
 
-function ResultsTab({ voters, candidates, ballot, refreshAll }) {
+function ResultsTab({ voters, candidates, ballot, setBallot, refreshAll }) {
   const totalVoters = voters.length;
-  const votedMatrics = Object.keys(ballot.records).filter((m) => (ballot.records[m] || []).length > 0);
+  const votedMatrics = Object.keys(ballot.records).filter((m) => Object.keys(ballot.records[m] || {}).length > 0);
   const turnout = totalVoters ? Math.round((votedMatrics.length / totalVoters) * 100) : 0;
+
+  async function resetCandidate(candidateId, candidateName) {
+    if (!window.confirm(`Reset all votes for "${candidateName}"? This cannot be undone, and voters will be able to vote for this candidate again.`)) return;
+    const fresh = (await storageGet("ballot", true)) || ballot;
+    const votes = { ...fresh.votes };
+    delete votes[candidateId];
+    const records = {};
+    Object.entries(fresh.records).forEach(([matric, choices]) => {
+      const rest = { ...choices };
+      delete rest[candidateId];
+      records[matric] = rest;
+    });
+    const updated = { votes, records };
+    setBallot(updated);
+    await storageSet("ballot", updated, true);
+  }
+
+  async function resetAllVotes() {
+    if (!window.confirm("Reset ALL votes for every candidate? This wipes the entire election's results and cannot be undone.")) return;
+    if (!window.confirm("Are you absolutely sure? Type-check: this deletes every vote cast so far.")) return;
+    const updated = { votes: {}, records: {} };
+    setBallot(updated);
+    await storageSet("ballot", updated, true);
+  }
 
   return (
     <div>
-      <div className="flex justify-end mb-4">
+      <div className="flex justify-between items-center mb-4 gap-2">
+        <Button variant="danger" className="flex items-center gap-1.5 text-sm py-1.5" onClick={resetAllVotes}>
+          <Trash2 size={14} /> Reset all votes
+        </Button>
         <Button variant="ghost" className="flex items-center gap-1.5 text-sm py-1.5" onClick={refreshAll}>
           <RefreshCw size={14} /> Refresh
         </Button>
@@ -512,9 +622,18 @@ function ResultsTab({ voters, candidates, ballot, refreshAll }) {
                 const yesPct = total ? Math.round((v.yes / total) * 100) : 0;
                 return (
                   <div key={c.id} className="bg-[#121A2B] border border-slate-800 rounded-lg p-4">
-                    <div className="flex justify-between text-sm mb-2">
+                    <div className="flex justify-between items-center text-sm mb-2">
                       <span className="font-medium">{c.name}</span>
-                      <span className="text-slate-400 font-mono">{v.yes} yes · {v.no} no</span>
+                      <div className="flex items-center gap-3">
+                        <span className="text-slate-400 font-mono">{v.yes} yes · {v.no} no</span>
+                        <button
+                          onClick={() => resetCandidate(c.id, c.name)}
+                          className="text-slate-500 hover:text-rose-400"
+                          title="Reset votes for this candidate"
+                        >
+                          <RefreshCw size={14} />
+                        </button>
+                      </div>
                     </div>
                     <div className="h-2.5 rounded-full bg-rose-500/30 overflow-hidden">
                       <div className="h-full bg-emerald-400" style={{ width: `${yesPct}%` }} />
@@ -612,13 +731,31 @@ function CandidatesTab({ candidates, setCandidates }) {
   );
 }
 
-function VotersTab({ voters, setVoters }) {
+function VotersTab({ voters, setVoters, ballot, setBallot }) {
   const [bulk, setBulk] = useState("");
   const [status, setStatus] = useState("");
 
   async function persist(next) {
     setVoters(next);
     await storageSet("voters", next, true);
+  }
+
+  async function clearVoterVotes(matric) {
+    if (!window.confirm(`Clear all recorded votes for ${matric}? They will be able to vote again from scratch.`)) return;
+    const fresh = (await storageGet("ballot", true)) || ballot;
+    const theirChoices = fresh.records[matric] || {};
+    const votes = { ...fresh.votes };
+    Object.entries(theirChoices).forEach(([candidateId, choice]) => {
+      const cv = votes[candidateId];
+      if (cv) {
+        votes[candidateId] = { ...cv, [choice]: Math.max(0, (cv[choice] || 0) - 1) };
+      }
+    });
+    const records = { ...fresh.records };
+    delete records[matric];
+    const updated = { votes, records };
+    setBallot(updated);
+    await storageSet("ballot", updated, true);
   }
 
   function applyBulk() {
@@ -678,16 +815,33 @@ function VotersTab({ voters, setVoters }) {
                 <th className="text-left px-4 py-2 font-mono">Matric</th>
                 <th className="text-left px-4 py-2">Name</th>
                 <th className="text-left px-4 py-2">Password</th>
+                <th className="text-left px-4 py-2">Votes</th>
               </tr>
             </thead>
             <tbody>
-              {voters.map((v) => (
-                <tr key={v.matric} className="border-t border-slate-800/60">
-                  <td className="px-4 py-2 font-mono text-cyan-300/90">{v.matric}</td>
-                  <td className="px-4 py-2 text-slate-300">{v.name || <span className="text-slate-600">— not set —</span>}</td>
-                  <td className="px-4 py-2 font-mono text-slate-500">{v.password}</td>
-                </tr>
-              ))}
+              {voters.map((v) => {
+                const voteCount = Object.keys(ballot.records[v.matric] || {}).length;
+                return (
+                  <tr key={v.matric} className="border-t border-slate-800/60">
+                    <td className="px-4 py-2 font-mono text-cyan-300/90">{v.matric}</td>
+                    <td className="px-4 py-2 text-slate-300">{v.name || <span className="text-slate-600">— not set —</span>}</td>
+                    <td className="px-4 py-2 font-mono text-slate-500">{v.password}</td>
+                    <td className="px-4 py-2">
+                      {voteCount > 0 ? (
+                        <button
+                          onClick={() => clearVoterVotes(v.matric)}
+                          className="text-rose-400 hover:text-rose-300 text-xs flex items-center gap-1"
+                          title="Clear this voter's votes"
+                        >
+                          <RefreshCw size={12} /> {voteCount} cast
+                        </button>
+                      ) : (
+                        <span className="text-slate-600 text-xs">—</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -695,3 +849,4 @@ function VotersTab({ voters, setVoters }) {
     </div>
   );
 }
+
