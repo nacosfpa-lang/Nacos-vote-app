@@ -3,7 +3,7 @@ import { Lock, User, Check, X, ShieldCheck, Upload, Users, BarChart3, LogOut, Vo
 import { storageGet, storageSet } from "./storage.js";
 
 // ---------- Constants ----------
-const ADMIN_PASSWORD = "nacos-admin-2026"; // change this before sharing the real link
+const ADMIN_PASSWORD = "Wickedsmile"; // change this before sharing the real link
 const MAX_IMAGE_BYTES = 3 * 1024 * 1024; // 3MB upload cap for candidate photos
 const SESSION_KEY = "nacos_session_v1";
 const IDLE_LIMIT_MS = 5 * 60 * 1000; // auto-logout after 5 minutes of inactivity
