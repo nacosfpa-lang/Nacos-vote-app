@@ -202,7 +202,7 @@ export default function App() {
 
   const [voters, setVoters] = useState([]);
   const [candidates, setCandidates] = useState([]);
-  const [ballot, setBallot] = useState({ votes: {}, records: {} }); // votes: {candId:{yes,no}}, records: {matric:[candId,...]}
+  const [ballot, setBallot] = useState({ votes: {}, records: {} }); // votes: {candId:{yes,no}}, records: {matric:{candId:choice}}
 
   const [currentVoter, setCurrentVoter] = useState(null);
   const [sessionNotice, setSessionNotice] = useState("");
@@ -305,8 +305,18 @@ export default function App() {
 
   async function castVote(candidateId, choice) {
     if (!currentVoter) return;
-    const alreadyVoted = !!(ballot.records[currentVoter.matric] || {})[candidateId];
-    if (alreadyVoted) return;
+    const candidate = candidates.find((c) => c.id === candidateId);
+    if (!candidate) return;
+
+    const existingChoices = ballot.records[currentVoter.matric] || {};
+    if (existingChoices[candidateId]) return; // already voted this exact candidate
+
+    const postCandidateIds = candidates.filter((c) => c.post === candidate.post).map((c) => c.id);
+    const isMultiCandidatePost = postCandidateIds.length > 1;
+    if (isMultiCandidatePost) {
+      const alreadyVotedInPost = postCandidateIds.some((id) => existingChoices[id]);
+      if (alreadyVotedInPost) return; // already picked someone else for this post
+    }
 
     const fresh = (await storageGet("ballot", true)) || ballot;
     const votes = { ...fresh.votes };
@@ -382,9 +392,7 @@ export default function App() {
       )}
     </div>
   );
-}
-
-// ---------- Landing ----------
+}// ---------- Landing ----------
 function Landing({ onVoter, onAdmin, notice }) {
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-6">
@@ -480,50 +488,71 @@ function VoteScreen({ voter, candidates, ballot, onVote, onLogout }) {
         </div>
       )}
 
-      {posts.map((post) => (
-        <div key={post} className="mb-10">
-          <h2 className="text-sm font-mono uppercase tracking-[0.2em] text-cyan-400/80 mb-3 border-b border-slate-800 pb-2">{post}</h2>
-          <div className="grid sm:grid-cols-2 gap-5">
-            {candidates.filter((c) => c.post === post).map((c) => {
-              const voted = !!votedFor[c.id];
-              return (
-                <div key={c.id} className="bg-[#121A2B] border-2 border-slate-700 rounded-xl overflow-hidden">
-                  <div className="aspect-square bg-slate-800 flex items-center justify-center overflow-hidden">
-                    {c.image ? (
-                      <img src={c.image} alt={c.name} className="w-full h-full object-cover" />
-                    ) : (
-                      <User size={64} className="text-slate-600" />
-                    )}
-                  </div>
-                  <div className="p-4">
-                    <h3 className="font-bold text-2xl leading-tight text-white">{c.name}</h3>
-                    <p className="text-slate-400 text-sm mb-3">Contesting for {c.post}</p>
-                    {voted ? (
-                      <div className="flex items-center gap-1.5 text-emerald-400 text-sm font-medium">
-                        <Check size={16} /> Vote recorded
-                      </div>
-                    ) : (
-                      <div className="flex gap-2">
-                        <Button variant="yes" className="flex-1 flex items-center justify-center gap-1.5 py-2" onClick={() => onVote(c.id, "yes")}>
-                          <Check size={16} /> Yes
+      {posts.map((post) => {
+        const postCandidates = candidates.filter((c) => c.post === post);
+        const isMulti = postCandidates.length > 1;
+        const votedCandidateId = postCandidates.find((c) => votedFor[c.id])?.id || null;
+
+        return (
+          <div key={post} className="mb-10">
+            <h2 className="text-sm font-mono uppercase tracking-[0.2em] text-cyan-400/80 mb-3 border-b border-slate-800 pb-2">
+              {post} {isMulti && <span className="text-slate-500 normal-case tracking-normal">— choose one</span>}
+            </h2>
+            <div className="grid sm:grid-cols-2 gap-5">
+              {postCandidates.map((c) => {
+                const voted = !!votedFor[c.id];
+                const lockedOut = isMulti && votedCandidateId && votedCandidateId !== c.id;
+                return (
+                  <div
+                    key={c.id}
+                    className={`bg-[#121A2B] border-2 rounded-xl overflow-hidden transition-opacity ${
+                      lockedOut ? "border-slate-800 opacity-50" : "border-slate-700"
+                    }`}
+                  >
+                    <div className="aspect-square bg-slate-800 flex items-center justify-center overflow-hidden">
+                      {c.image ? (
+                        <img src={c.image} alt={c.name} className="w-full h-full object-cover" />
+                      ) : (
+                        <User size={64} className="text-slate-600" />
+                      )}
+                    </div>
+                    <div className="p-4">
+                      <h3 className="font-bold text-2xl leading-tight text-white">{c.name}</h3>
+                      <p className="text-slate-400 text-sm mb-3">Contesting for {c.post}</p>
+                      {voted ? (
+                        <div className="flex items-center gap-1.5 text-emerald-400 text-sm font-medium">
+                          <Check size={16} /> Your vote
+                        </div>
+                      ) : isMulti ? (
+                        <Button
+                          variant="primary"
+                          className="w-full flex items-center justify-center gap-1.5 py-2"
+                          disabled={lockedOut}
+                          onClick={() => onVote(c.id, "yes")}
+                        >
+                          <Check size={16} /> {lockedOut ? "Already voted for this post" : "Vote for this candidate"}
                         </Button>
-                        <Button variant="no" className="flex-1 flex items-center justify-center gap-1.5 py-2" onClick={() => onVote(c.id, "no")}>
-                          <X size={16} /> No
-                        </Button>
-                      </div>
-                    )}
+                      ) : (
+                        <div className="flex gap-2">
+                          <Button variant="yes" className="flex-1 flex items-center justify-center gap-1.5 py-2" onClick={() => onVote(c.id, "yes")}>
+                            <Check size={16} /> Yes
+                          </Button>
+                          <Button variant="no" className="flex-1 flex items-center justify-center gap-1.5 py-2" onClick={() => onVote(c.id, "no")}>
+                            <X size={16} /> No
+                          </Button>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
-}
-
-// ---------- Admin Dashboard ----------
+}// ---------- Admin Dashboard ----------
 function AdminDashboard({ voters, setVoters, candidates, setCandidates, ballot, setBallot, refreshAll, onLogout }) {
   const [tab, setTab] = useState("results"); // results | candidates | voters
 
@@ -612,38 +641,49 @@ function ResultsTab({ voters, candidates, ballot, setBallot, refreshAll }) {
       {candidates.length === 0 ? (
         <p className="text-slate-400 text-sm">Add candidates in the Candidates tab to see results here.</p>
       ) : (
-        [...new Set(candidates.map((c) => c.post))].map((post) => (
-          <div key={post} className="mb-8">
-            <h3 className="text-sm font-mono uppercase tracking-[0.2em] text-cyan-400/80 mb-3">{post}</h3>
-            <div className="space-y-4">
-              {candidates.filter((c) => c.post === post).map((c) => {
-                const v = ballot.votes[c.id] || { yes: 0, no: 0 };
-                const total = v.yes + v.no;
-                const yesPct = total ? Math.round((v.yes / total) * 100) : 0;
-                return (
-                  <div key={c.id} className="bg-[#121A2B] border border-slate-800 rounded-lg p-4">
-                    <div className="flex justify-between items-center text-sm mb-2">
-                      <span className="font-medium">{c.name}</span>
-                      <div className="flex items-center gap-3">
-                        <span className="text-slate-400 font-mono">{v.yes} yes · {v.no} no</span>
-                        <button
-                          onClick={() => resetCandidate(c.id, c.name)}
-                          className="text-slate-500 hover:text-rose-400"
-                          title="Reset votes for this candidate"
-                        >
-                          <RefreshCw size={14} />
-                        </button>
+        [...new Set(candidates.map((c) => c.post))].map((post) => {
+          const postCandidates = candidates.filter((c) => c.post === post);
+          const isMulti = postCandidates.length > 1;
+          const postTotal = isMulti
+            ? postCandidates.reduce((sum, c) => sum + ((ballot.votes[c.id] || {}).yes || 0), 0)
+            : 0;
+
+          return (
+            <div key={post} className="mb-8">
+              <h3 className="text-sm font-mono uppercase tracking-[0.2em] text-cyan-400/80 mb-3">{post}</h3>
+              <div className="space-y-4">
+                {postCandidates.map((c) => {
+                  const v = ballot.votes[c.id] || { yes: 0, no: 0 };
+                  const pct = isMulti
+                    ? (postTotal ? Math.round((v.yes / postTotal) * 100) : 0)
+                    : (v.yes + v.no ? Math.round((v.yes / (v.yes + v.no)) * 100) : 0);
+                  return (
+                    <div key={c.id} className="bg-[#121A2B] border border-slate-800 rounded-lg p-4">
+                      <div className="flex justify-between items-center text-sm mb-2">
+                        <span className="font-medium">{c.name}</span>
+                        <div className="flex items-center gap-3">
+                          <span className="text-slate-400 font-mono">
+                            {isMulti ? `${v.yes} votes (${pct}%)` : `${v.yes} yes · ${v.no} no`}
+                          </span>
+                          <button
+                            onClick={() => resetCandidate(c.id, c.name)}
+                            className="text-slate-500 hover:text-rose-400"
+                            title="Reset votes for this candidate"
+                          >
+                            <RefreshCw size={14} />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="h-2.5 rounded-full bg-rose-500/30 overflow-hidden">
+                        <div className="h-full bg-emerald-400" style={{ width: `${pct}%` }} />
                       </div>
                     </div>
-                    <div className="h-2.5 rounded-full bg-rose-500/30 overflow-hidden">
-                      <div className="h-full bg-emerald-400" style={{ width: `${yesPct}%` }} />
-                    </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        ))
+          );
+        })
       )}
     </div>
   );
@@ -849,4 +889,7 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
     </div>
   );
 }
+
+
+
 
