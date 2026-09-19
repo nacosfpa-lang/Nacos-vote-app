@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Lock, User, Check, X, ShieldCheck, Upload, Users, BarChart3, LogOut, Vote, Plus, Trash2, RefreshCw, Eye, EyeOff } from "lucide-react";
+import { Lock, User, Check, X, ShieldCheck, Upload, Users, BarChart3, LogOut, Vote, Plus, Trash2, RefreshCw, Eye, EyeOff, Mail } from "lucide-react";
 import { storageGet, storageSet } from "./storage.js";
 
 // ---------- Constants ----------
@@ -25,6 +25,13 @@ function clearSession() {
   try {
     window.localStorage.removeItem(SESSION_KEY);
   } catch (e) {}
+}
+
+function isVotingOpen(status) {
+  if (!status) return true;
+  if (!status.open) return false;
+  if (status.closesAt && Date.now() > new Date(status.closesAt).getTime()) return false;
+  return true;
 }
 
 // Names pulled from the department's ND1 (25-series) and ND2 (24-series) class lists.
@@ -120,13 +127,13 @@ function generateDefaultVoters() {
     const matric = `FPA/CS/24/1-${pad4(i)}`;
     const name = ND24_NAMES[i] || "";
     const password = name ? surnameOf(name) : matric;
-    voters.push({ matric, name, password, hasSetName: !!name });
+    voters.push({ matric, name, password, hasSetName: !!name, email: "" });
   }
   for (let i = 1; i <= 142; i++) {
     const matric = `FPA/CS/25/1-${pad4(i)}`;
     const name = ND25_NAMES[i] || "";
     const password = name ? surnameOf(name) : matric;
-    voters.push({ matric, name, password, hasSetName: !!name });
+    voters.push({ matric, name, password, hasSetName: !!name, email: "" });
   }
   return voters;
 }
@@ -203,6 +210,7 @@ export default function App() {
   const [voters, setVoters] = useState([]);
   const [candidates, setCandidates] = useState([]);
   const [ballot, setBallot] = useState({ votes: {}, records: {} }); // votes: {candId:{yes,no}}, records: {matric:{candId:choice}}
+  const [electionStatus, setElectionStatus] = useState({ open: true, closesAt: null });
 
   const [currentVoter, setCurrentVoter] = useState(null);
   const [sessionNotice, setSessionNotice] = useState("");
@@ -219,9 +227,15 @@ export default function App() {
       if (!c) c = [];
       let b = await storageGet("ballot", true);
       if (!b) b = { votes: {}, records: {} };
+      let es = await storageGet("electionStatus", true);
+      if (!es) {
+        es = { open: true, closesAt: null };
+        await storageSet("electionStatus", es, true);
+      }
       setVoters(v);
       setCandidates(c);
       setBallot(b);
+      setElectionStatus(es);
       setLoading(false);
 
       const session = loadSession();
@@ -264,6 +278,12 @@ export default function App() {
         setCurrentVoter(null);
         setSessionNotice("You were logged out after 5 minutes of inactivity.");
         setScreen("landing");
+        return;
+      }
+      if (screen === "vote") {
+        storageGet("electionStatus", true).then((es) => {
+          if (es) setElectionStatus(es);
+        });
       }
     }, 15000);
 
@@ -274,14 +294,16 @@ export default function App() {
   }, [screen]);
 
   const refreshAll = useCallback(async () => {
-    const [v, c, b] = await Promise.all([
+    const [v, c, b, es] = await Promise.all([
       storageGet("voters", true),
       storageGet("candidates", true),
       storageGet("ballot", true),
+      storageGet("electionStatus", true),
     ]);
     if (v) setVoters(v);
     if (c) setCandidates(c);
     if (b) setBallot(b);
+    if (es) setElectionStatus(es);
   }, []);
 
   // ---------- Voter login ----------
@@ -305,6 +327,7 @@ export default function App() {
 
   async function castVote(candidateId, choice) {
     if (!currentVoter) return;
+    if (!isVotingOpen(electionStatus)) return; // uses the already-polled status, no extra wait
     const candidate = candidates.find((c) => c.id === candidateId);
     if (!candidate) return;
 
@@ -317,6 +340,13 @@ export default function App() {
       const alreadyVotedInPost = postCandidateIds.some((id) => existingChoices[id]);
       if (alreadyVotedInPost) return; // already picked someone else for this post
     }
+
+    // Show the vote as recorded immediately — sync with the shared tally in the background.
+    const optimisticVotes = { ...ballot.votes };
+    const ocv = optimisticVotes[candidateId] || { yes: 0, no: 0 };
+    optimisticVotes[candidateId] = { ...ocv, [choice]: (ocv[choice] || 0) + 1 };
+    const optimisticRecords = { ...ballot.records, [currentVoter.matric]: { ...existingChoices, [candidateId]: choice } };
+    setBallot({ votes: optimisticVotes, records: optimisticRecords });
 
     const fresh = (await storageGet("ballot", true)) || ballot;
     const votes = { ...fresh.votes };
@@ -371,6 +401,7 @@ export default function App() {
           voter={currentVoter}
           candidates={candidates}
           ballot={ballot}
+          electionStatus={electionStatus}
           onVote={castVote}
           onLogout={() => { clearSession(); setCurrentVoter(null); setScreen("landing"); }}
         />
@@ -386,6 +417,8 @@ export default function App() {
           setCandidates={setCandidates}
           ballot={ballot}
           setBallot={setBallot}
+          electionStatus={electionStatus}
+          setElectionStatus={setElectionStatus}
           refreshAll={refreshAll}
           onLogout={() => { clearSession(); setScreen("landing"); }}
         />
@@ -466,9 +499,25 @@ function AdminLogin({ onSubmit, onBack, error }) {
 }
 
 // ---------- Vote Screen ----------
-function VoteScreen({ voter, candidates, ballot, onVote, onLogout }) {
+function VoteScreen({ voter, candidates, ballot, electionStatus, onVote, onLogout }) {
   const posts = [...new Set(candidates.map((c) => c.post))];
   const votedFor = ballot.records[voter.matric] || {};
+  const votingOpen = isVotingOpen(electionStatus);
+
+  if (!votingOpen) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center px-6 text-center">
+        <div className="max-w-sm">
+          <p className="text-xs font-mono text-cyan-400 uppercase tracking-widest mb-2">{voter.name || voter.matric}</p>
+          <h1 className="text-2xl font-bold mb-3">Voting is closed</h1>
+          <p className="text-slate-400 mb-8">The Electoral Commission has closed voting for this election. Any votes you already cast are safely recorded.</p>
+          <button onClick={onLogout} className="text-slate-400 hover:text-rose-400 flex items-center gap-1.5 text-sm mx-auto">
+            <LogOut size={16} /> Log out
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen px-5 py-8 max-w-3xl mx-auto">
@@ -553,7 +602,7 @@ function VoteScreen({ voter, candidates, ballot, onVote, onLogout }) {
     </div>
   );
 }// ---------- Admin Dashboard ----------
-function AdminDashboard({ voters, setVoters, candidates, setCandidates, ballot, setBallot, refreshAll, onLogout }) {
+function AdminDashboard({ voters, setVoters, candidates, setCandidates, ballot, setBallot, electionStatus, setElectionStatus, refreshAll, onLogout }) {
   const [tab, setTab] = useState("results"); // results | candidates | voters
 
   return (
@@ -586,14 +635,93 @@ function AdminDashboard({ voters, setVoters, candidates, setCandidates, ballot, 
         ))}
       </div>
 
-      {tab === "results" && <ResultsTab voters={voters} candidates={candidates} ballot={ballot} setBallot={setBallot} refreshAll={refreshAll} />}
+      {tab === "results" && (
+        <ResultsTab
+          voters={voters}
+          candidates={candidates}
+          ballot={ballot}
+          setBallot={setBallot}
+          electionStatus={electionStatus}
+          setElectionStatus={setElectionStatus}
+          refreshAll={refreshAll}
+        />
+      )}
       {tab === "candidates" && <CandidatesTab candidates={candidates} setCandidates={setCandidates} />}
       {tab === "voters" && <VotersTab voters={voters} setVoters={setVoters} ballot={ballot} setBallot={setBallot} />}
     </div>
   );
 }
 
-function ResultsTab({ voters, candidates, ballot, setBallot, refreshAll }) {
+function toLocalInputValue(iso) {
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function VotingControl({ electionStatus, setElectionStatus }) {
+  const [closesAtInput, setClosesAtInput] = useState(
+    electionStatus.closesAt ? toLocalInputValue(electionStatus.closesAt) : ""
+  );
+  const open = isVotingOpen(electionStatus);
+
+  async function persist(next) {
+    setElectionStatus(next);
+    await storageSet("electionStatus", next, true);
+  }
+
+  async function toggleOpen() {
+    await persist({ ...electionStatus, open: !electionStatus.open });
+  }
+
+  async function setSchedule() {
+    if (!closesAtInput) return;
+    const iso = new Date(closesAtInput).toISOString();
+    await persist({ ...electionStatus, open: true, closesAt: iso });
+  }
+
+  async function clearSchedule() {
+    setClosesAtInput("");
+    await persist({ ...electionStatus, closesAt: null });
+  }
+
+  return (
+    <div className="bg-[#121A2B] border border-slate-800 rounded-xl p-5 mb-6">
+      <h3 className="font-semibold mb-3">Voting Control</h3>
+      <div className="flex items-center gap-2 mb-4">
+        <span className={`w-2.5 h-2.5 rounded-full ${open ? "bg-emerald-400" : "bg-rose-400"}`} />
+        <span className={`text-sm font-medium ${open ? "text-emerald-400" : "text-rose-400"}`}>
+          Voting is {open ? "OPEN" : "CLOSED"}
+        </span>
+      </div>
+      <Button variant={electionStatus.open ? "danger" : "primary"} className="mb-5" onClick={toggleOpen}>
+        {electionStatus.open ? "Close voting now" : "Reopen voting"}
+      </Button>
+
+      <div className="border-t border-slate-800 pt-4">
+        <p className="text-slate-400 text-sm mb-2">Or schedule an automatic closing time:</p>
+        <div className="flex gap-2 flex-wrap items-center">
+          <input
+            type="datetime-local"
+            value={closesAtInput}
+            onChange={(e) => setClosesAtInput(e.target.value)}
+            className="bg-[#0B1220] border border-slate-700 rounded-md px-3 py-2 text-slate-100 text-sm"
+          />
+          <Button variant="ghost" className="text-sm py-2" onClick={setSchedule}>Set closing time</Button>
+          {electionStatus.closesAt && (
+            <Button variant="ghost" className="text-sm py-2" onClick={clearSchedule}>Clear schedule</Button>
+          )}
+        </div>
+        {electionStatus.closesAt && (
+          <p className="text-slate-500 text-xs mt-2">
+            Scheduled to close automatically at {new Date(electionStatus.closesAt).toLocaleString()}.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ResultsTab({ voters, candidates, ballot, setBallot, electionStatus, setElectionStatus, refreshAll }) {
   const totalVoters = voters.length;
   const votedMatrics = Object.keys(ballot.records).filter((m) => Object.keys(ballot.records[m] || {}).length > 0);
   const turnout = totalVoters ? Math.round((votedMatrics.length / totalVoters) * 100) : 0;
@@ -624,6 +752,7 @@ function ResultsTab({ voters, candidates, ballot, setBallot, refreshAll }) {
 
   return (
     <div>
+      <VotingControl electionStatus={electionStatus} setElectionStatus={setElectionStatus} />
       <div className="flex justify-between items-center mb-4 gap-2">
         <Button variant="danger" className="flex items-center gap-1.5 text-sm py-1.5" onClick={resetAllVotes}>
           <Trash2 size={14} /> Reset all votes
@@ -771,9 +900,29 @@ function CandidatesTab({ candidates, setCandidates }) {
   );
 }
 
+// Tries to fix common matric-number typos (missing hyphen, double slashes, CS/CA typo,
+// stray underscores) and reconstructs a canonical matric number. Returns null if the
+// year segment can't be confidently identified (never guesses between 24 and 25).
+function reconstructMatric(raw) {
+  let s = raw.toUpperCase().trim();
+  s = s.replace(/[–—_]/g, "-");
+  s = s.replace(/\s+/g, "");
+  s = s.replace(/\/{2,}/g, "/");
+  const numMatch = s.match(/(\d{4})$/);
+  if (!numMatch) return null;
+  let yearMatch = s.match(/CS\/?(\d{2})/);
+  if (!yearMatch || (yearMatch[1] !== "24" && yearMatch[1] !== "25")) {
+    yearMatch = s.match(/\/(\d{2})\//);
+  }
+  if (!yearMatch || (yearMatch[1] !== "24" && yearMatch[1] !== "25")) return null;
+  return `FPA/CS/${yearMatch[1]}/1-${numMatch[1]}`;
+}
+
 function VotersTab({ voters, setVoters, ballot, setBallot }) {
   const [bulk, setBulk] = useState("");
   const [status, setStatus] = useState("");
+  const [emailImportText, setEmailImportText] = useState("");
+  const [emailImportReport, setEmailImportReport] = useState(null);
 
   async function persist(next) {
     setVoters(next);
@@ -821,14 +970,79 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
     setBulk("");
   }
 
+  function importEmails() {
+    const validMatrics = new Set(voters.map((v) => v.matric));
+    const lines = emailImportText.split("\n").map((l) => l.trim()).filter(Boolean);
+    const emailMap = {}; // matric -> email, last occurrence wins
+    const unmatched = [];
+    let duplicateOverwrites = 0;
+
+    lines.forEach((line) => {
+      const parts = (line.includes("\t") ? line.split("\t") : line.split(",")).map((p) => p.trim()).filter(Boolean);
+      const emailField = parts.find((p) => p.includes("@"));
+      const matricField = parts.find((p) => p !== emailField && !/GMT/i.test(p) && /CS|FPA/i.test(p));
+      if (!emailField || !matricField) return;
+      const candidate = reconstructMatric(matricField);
+      if (candidate && validMatrics.has(candidate)) {
+        if (emailMap[candidate]) duplicateOverwrites++;
+        emailMap[candidate] = emailField;
+      } else {
+        unmatched.push({ raw: matricField, email: emailField });
+      }
+    });
+
+    const updated = voters.map((v) => (emailMap[v.matric] ? { ...v, email: emailMap[v.matric] } : v));
+    persist(updated);
+    setEmailImportReport({ matched: Object.keys(emailMap).length, unmatched, duplicateOverwrites });
+    setEmailImportText("");
+  }
+
   const registeredCount = voters.length;
   const namedCount = voters.filter((v) => v.hasSetName).length;
+  const emailCount = voters.filter((v) => v.email).length;
 
   return (
     <div>
-      <div className="grid grid-cols-2 gap-3 mb-6">
+      <div className="grid grid-cols-3 gap-3 mb-6">
         <Stat label="Registered Matric Numbers" value={registeredCount} />
         <Stat label="Names Assigned" value={namedCount} />
+        <Stat label="Emails Collected" value={`${emailCount}/${registeredCount}`} />
+      </div>
+
+      <div className="bg-[#121A2B] border border-slate-800 rounded-xl p-5 mb-6">
+        <h3 className="font-semibold mb-2 flex items-center gap-1.5"><Mail size={16} className="text-cyan-400" /> Import Voter Emails</h3>
+        <p className="text-slate-400 text-sm mb-3">
+          Paste rows copied straight from your Google Form response sheet (any column order — Timestamp, Matric Number, Email all fine). Common formatting typos in the matric number are corrected automatically; anything too ambiguous to fix safely is flagged below instead of guessed.
+        </p>
+        <textarea
+          value={emailImportText}
+          onChange={(e) => setEmailImportText(e.target.value)}
+          rows={6}
+          placeholder={"FPA/CS/24/1-0016\tsimonenoch02@gmail.com\nFPA/CS/25/1-0101\taderibigbebolarinwa@gmail.com"}
+          className="w-full bg-[#0B1220] border border-slate-700 focus:border-cyan-400 outline-none rounded-md px-3 py-2.5 text-slate-100 font-mono text-sm mb-3"
+        />
+        <Button onClick={importEmails}>Import</Button>
+
+        {emailImportReport && (
+          <div className="mt-4 text-sm">
+            <p className="text-emerald-400 mb-1">
+              Matched and saved {emailImportReport.matched} email(s).
+              {emailImportReport.duplicateOverwrites > 0 && ` (${emailImportReport.duplicateOverwrites} duplicate submission(s) resolved — kept the most recent.)`}
+            </p>
+            {emailImportReport.unmatched.length > 0 && (
+              <div className="mt-3 bg-amber-500/10 border border-amber-500/30 rounded-md p-3">
+                <p className="text-amber-300 font-medium mb-2">
+                  {emailImportReport.unmatched.length} row(s) couldn't be matched automatically — fix these manually and re-paste just these lines:
+                </p>
+                <div className="space-y-1 font-mono text-xs text-amber-200/90 max-h-40 overflow-y-auto">
+                  {emailImportReport.unmatched.map((u, i) => (
+                    <div key={i}>{u.raw} — {u.email}</div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="bg-[#121A2B] border border-slate-800 rounded-xl p-5 mb-6">
@@ -854,7 +1068,7 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
               <tr>
                 <th className="text-left px-4 py-2 font-mono">Matric</th>
                 <th className="text-left px-4 py-2">Name</th>
-                <th className="text-left px-4 py-2">Password</th>
+                <th className="text-left px-4 py-2">Email</th>
                 <th className="text-left px-4 py-2">Votes</th>
               </tr>
             </thead>
@@ -865,7 +1079,7 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
                   <tr key={v.matric} className="border-t border-slate-800/60">
                     <td className="px-4 py-2 font-mono text-cyan-300/90">{v.matric}</td>
                     <td className="px-4 py-2 text-slate-300">{v.name || <span className="text-slate-600">— not set —</span>}</td>
-                    <td className="px-4 py-2 font-mono text-slate-500">{v.password}</td>
+                    <td className="px-4 py-2 text-slate-500 text-xs">{v.email || <span className="text-slate-600">— none —</span>}</td>
                     <td className="px-4 py-2">
                       {voteCount > 0 ? (
                         <button
@@ -889,7 +1103,3 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
     </div>
   );
 }
-
-
-
-
