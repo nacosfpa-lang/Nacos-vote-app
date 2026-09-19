@@ -1,6 +1,14 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Lock, User, Check, X, ShieldCheck, Upload, Users, BarChart3, LogOut, Vote, Plus, Trash2, RefreshCw, Eye, EyeOff, Mail } from "lucide-react";
-import { storageGet, storageSet } from "./storage.js";
+import { Lock, User, Check, X, ShieldCheck, Upload, Users, BarChart3, LogOut, Vote, Plus, Trash2, RefreshCw, Eye, EyeOff, Mail, Send } from "lucide-react";
+import {
+  storageGet,
+  storageSet,
+  sendVoterSignInLink,
+  isEmailSignInLink,
+  completeEmailSignIn,
+  setVoterPassword,
+  voterPasswordLogin,
+} from "./storage.js";
 
 // ---------- Constants ----------
 const ADMIN_PASSWORD = "Wickedsmile"; // change this before sharing the real link
@@ -32,6 +40,13 @@ function isVotingOpen(status) {
   if (!status.open) return false;
   if (status.closesAt && Date.now() > new Date(status.closesAt).getTime()) return false;
   return true;
+}
+
+function maskEmail(email) {
+  const [user, domain] = String(email).split("@");
+  if (!domain) return email;
+  const visible = user.slice(0, 2);
+  return `${visible}${"*".repeat(Math.max(user.length - 2, 3))}@${domain}`;
 }
 
 // Names pulled from the department's ND1 (25-series) and ND2 (24-series) class lists.
@@ -127,13 +142,13 @@ function generateDefaultVoters() {
     const matric = `FPA/CS/24/1-${pad4(i)}`;
     const name = ND24_NAMES[i] || "";
     const password = name ? surnameOf(name) : matric;
-    voters.push({ matric, name, password, hasSetName: !!name, email: "" });
+    voters.push({ matric, name, password, hasSetName: !!name, email: "", registered: false });
   }
   for (let i = 1; i <= 142; i++) {
     const matric = `FPA/CS/25/1-${pad4(i)}`;
     const name = ND25_NAMES[i] || "";
     const password = name ? surnameOf(name) : matric;
-    voters.push({ matric, name, password, hasSetName: !!name, email: "" });
+    voters.push({ matric, name, password, hasSetName: !!name, email: "", registered: false });
   }
   return voters;
 }
@@ -203,21 +218,35 @@ function Button({ children, variant = "primary", className = "", ...props }) {
 
 // ---------- App ----------
 export default function App() {
-  const [screen, setScreen] = useState("landing"); // landing | voter-login | vote | admin-login | admin
+  const [screen, setScreen] = useState("landing"); // landing | voter-login | vote | admin-login | admin | set-password
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   const [voters, setVoters] = useState([]);
   const [candidates, setCandidates] = useState([]);
-  const [ballot, setBallot] = useState({ votes: {}, records: {} }); // votes: {candId:{yes,no}}, records: {matric:{candId:choice}}
+  const [ballot, setBallot] = useState({ votes: {}, records: {} });
   const [electionStatus, setElectionStatus] = useState({ open: true, closesAt: null });
 
   const [currentVoter, setCurrentVoter] = useState(null);
   const [sessionNotice, setSessionNotice] = useState("");
+  const [pendingSetup, setPendingSetup] = useState(null); // { matric } while setting a first password
 
   // init load
   useEffect(() => {
     (async () => {
+      let cameFromEmailLink = false;
+
+      if (isEmailSignInLink()) {
+        try {
+          const { matric } = await completeEmailSignIn();
+          setPendingSetup({ matric });
+          setScreen("set-password");
+          cameFromEmailLink = true;
+        } catch (e) {
+          setError("That verification link is invalid or has expired. Please request a new one.");
+        }
+      }
+
       let v = await storageGet("voters", true);
       if (!v) {
         v = generateDefaultVoters();
@@ -238,21 +267,23 @@ export default function App() {
       setElectionStatus(es);
       setLoading(false);
 
-      const session = loadSession();
-      if (session && Date.now() - session.lastActivity < IDLE_LIMIT_MS) {
-        if (session.type === "admin") {
-          setScreen("admin");
-        } else if (session.type === "voter") {
-          const voter = v.find((x) => x.matric === session.matric);
-          if (voter) {
-            setCurrentVoter(voter);
-            setScreen("vote");
-          } else {
-            clearSession();
+      if (!cameFromEmailLink) {
+        const session = loadSession();
+        if (session && Date.now() - session.lastActivity < IDLE_LIMIT_MS) {
+          if (session.type === "admin") {
+            setScreen("admin");
+          } else if (session.type === "voter") {
+            const voter = v.find((x) => x.matric === session.matric);
+            if (voter) {
+              setCurrentVoter(voter);
+              setScreen("vote");
+            } else {
+              clearSession();
+            }
           }
+        } else if (session) {
+          clearSession();
         }
-      } else if (session) {
-        clearSession();
       }
     })();
   }, []);
@@ -306,8 +337,8 @@ export default function App() {
     if (es) setElectionStatus(es);
   }, []);
 
-  // ---------- Voter login ----------
-  function handleVoterLogin(matricRaw, password) {
+  // ---------- Voter login (legacy path — only used for voters with no email on file) ----------
+  function handleLegacyLogin(matricRaw, password) {
     setError("");
     setSessionNotice("");
     const matric = matricRaw.trim().toUpperCase();
@@ -325,23 +356,71 @@ export default function App() {
     saveSession({ type: "voter", matric: voter.matric, lastActivity: Date.now() });
   }
 
+  // ---------- Voter login (email-verified path) ----------
+  async function handleSendVoterLink(voter) {
+    setError("");
+    try {
+      await sendVoterSignInLink(voter.email, voter.matric);
+      return true;
+    } catch (e) {
+      setError("Could not send the verification email. Please try again in a moment.");
+      return false;
+    }
+  }
+
+  async function handleVoterPasswordLogin(voter, password) {
+    setError("");
+    try {
+      await voterPasswordLogin(voter.email, password);
+      setCurrentVoter(voter);
+      setScreen("vote");
+      saveSession({ type: "voter", matric: voter.matric, lastActivity: Date.now() });
+    } catch (e) {
+      setError("Incorrect password.");
+    }
+  }
+
+  async function handleSetPassword(newPassword) {
+    if (!pendingSetup) return;
+    setError("");
+    try {
+      await setVoterPassword(newPassword);
+      const freshVoters = (await storageGet("voters", true)) || voters;
+      const updated = freshVoters.map((v) =>
+        v.matric === pendingSetup.matric ? { ...v, registered: true } : v
+      );
+      setVoters(updated);
+      await storageSet("voters", updated, true);
+      const voter = updated.find((v) => v.matric === pendingSetup.matric);
+      setPendingSetup(null);
+      if (voter) {
+        setCurrentVoter(voter);
+        setScreen("vote");
+        saveSession({ type: "voter", matric: voter.matric, lastActivity: Date.now() });
+      } else {
+        setScreen("landing");
+      }
+    } catch (e) {
+      setError("Could not set your password. Please try requesting a new verification link.");
+    }
+  }
+
   async function castVote(candidateId, choice) {
     if (!currentVoter) return;
-    if (!isVotingOpen(electionStatus)) return; // uses the already-polled status, no extra wait
+    if (!isVotingOpen(electionStatus)) return;
     const candidate = candidates.find((c) => c.id === candidateId);
     if (!candidate) return;
 
     const existingChoices = ballot.records[currentVoter.matric] || {};
-    if (existingChoices[candidateId]) return; // already voted this exact candidate
+    if (existingChoices[candidateId]) return;
 
     const postCandidateIds = candidates.filter((c) => c.post === candidate.post).map((c) => c.id);
     const isMultiCandidatePost = postCandidateIds.length > 1;
     if (isMultiCandidatePost) {
       const alreadyVotedInPost = postCandidateIds.some((id) => existingChoices[id]);
-      if (alreadyVotedInPost) return; // already picked someone else for this post
+      if (alreadyVotedInPost) return;
     }
 
-    // Show the vote as recorded immediately — sync with the shared tally in the background.
     const optimisticVotes = { ...ballot.votes };
     const ocv = optimisticVotes[candidateId] || { yes: 0, no: 0 };
     optimisticVotes[candidateId] = { ...ocv, [choice]: (ocv[choice] || 0) + 1 };
@@ -384,17 +463,24 @@ export default function App() {
     <div className="min-h-screen bg-[#0B1220] text-slate-100 font-sans">
       {screen === "landing" && (
         <Landing
-          onVoter={() => { setSessionNotice(""); setScreen("voter-login"); }}
-          onAdmin={() => { setSessionNotice(""); setScreen("admin-login"); }}
+          onVoter={() => { setSessionNotice(""); setError(""); setScreen("voter-login"); }}
+          onAdmin={() => { setSessionNotice(""); setError(""); setScreen("admin-login"); }}
           notice={sessionNotice}
         />
       )}
       {screen === "voter-login" && (
         <VoterLogin
-          onSubmit={handleVoterLogin}
+          voters={voters}
+          onSendLink={handleSendVoterLink}
+          onPasswordLogin={handleVoterPasswordLogin}
+          onLegacyLogin={handleLegacyLogin}
           onBack={() => { setError(""); setScreen("landing"); }}
           error={error}
+          setError={setError}
         />
+      )}
+      {screen === "set-password" && (
+        <SetPasswordScreen onSubmit={handleSetPassword} error={error} />
       )}
       {screen === "vote" && currentVoter && (
         <VoteScreen
@@ -451,29 +537,155 @@ function Landing({ onVoter, onAdmin, notice }) {
   );
 }
 
-// ---------- Voter Login ----------
-function VoterLogin({ onSubmit, onBack, error }) {
+// ---------- Voter Login (multi-step) ----------
+function VoterLogin({ voters, onSendLink, onPasswordLogin, onLegacyLogin, onBack, error, setError }) {
+  const [step, setStep] = useState("matric"); // matric | need-verification | link-sent | password | legacy-password
   const [matric, setMatric] = useState("");
   const [password, setPassword] = useState("");
+  const [voter, setVoter] = useState(null);
+  const [localError, setLocalError] = useState("");
+  const [sending, setSending] = useState(false);
+
+  function handleContinue() {
+    setLocalError("");
+    setError("");
+    const clean = matric.trim().toUpperCase();
+    const found = voters.find((v) => v.matric.toUpperCase() === clean);
+    if (!found) {
+      setLocalError("Matric number not found in the voters register.");
+      return;
+    }
+    setVoter(found);
+    if (found.email && found.registered) {
+      setStep("password");
+    } else if (found.email && !found.registered) {
+      setStep("need-verification");
+    } else {
+      setStep("legacy-password");
+    }
+  }
+
+  async function handleSendLink() {
+    setSending(true);
+    const ok = await onSendLink(voter);
+    setSending(false);
+    if (ok) setStep("link-sent");
+  }
+
+  function backToMatric() {
+    setStep("matric");
+    setPassword("");
+    setLocalError("");
+    setError("");
+  }
+
   return (
     <div className="min-h-screen flex items-center justify-center px-6">
       <div className="max-w-sm w-full bg-[#121A2B] border border-slate-800 rounded-xl p-7">
         <h2 className="text-xl font-bold mb-1">Voter Login</h2>
-        <p className="text-slate-400 text-sm mb-6">Use your matric number and password.</p>
-        <Field label="Matric Number">
-          <TextInput
-            placeholder="FPA/CS/24/1-0001"
-            value={matric}
-            onChange={(e) => setMatric(e.target.value)}
-            className="font-mono"
-          />
+
+        {step === "matric" && (
+          <>
+            <p className="text-slate-400 text-sm mb-6">Enter your matric number to continue.</p>
+            <Field label="Matric Number">
+              <TextInput
+                placeholder="FPA/CS/24/1-0001"
+                value={matric}
+                onChange={(e) => setMatric(e.target.value)}
+                className="font-mono"
+              />
+            </Field>
+            {localError && <p className="text-rose-400 text-sm mb-4">{localError}</p>}
+            <Button className="w-full" onClick={handleContinue}>Continue</Button>
+          </>
+        )}
+
+        {step === "need-verification" && voter && (
+          <>
+            <p className="text-slate-400 text-sm mb-2">First time voting on this app. We'll send a one-time verification link to:</p>
+            <p className="font-mono text-cyan-300 text-sm mb-6">{maskEmail(voter.email)}</p>
+            {error && <p className="text-rose-400 text-sm mb-4">{error}</p>}
+            <Button className="w-full flex items-center justify-center gap-1.5" onClick={handleSendLink} disabled={sending}>
+              <Send size={16} /> {sending ? "Sending…" : "Send verification link"}
+            </Button>
+            <button onClick={backToMatric} className="text-slate-500 hover:text-slate-300 text-sm mt-4 block mx-auto">← Use a different matric number</button>
+          </>
+        )}
+
+        {step === "link-sent" && voter && (
+          <>
+            <p className="text-emerald-400 text-sm mb-2 flex items-center gap-1.5"><Check size={16} /> Link sent</p>
+            <p className="text-slate-400 text-sm mb-6">
+              Check the inbox for <span className="font-mono text-cyan-300">{maskEmail(voter.email)}</span> (and your spam folder) and tap the link to finish setting up your password.
+            </p>
+            <button onClick={backToMatric} className="text-slate-500 hover:text-slate-300 text-sm mx-auto block">← Back</button>
+          </>
+        )}
+
+        {step === "password" && voter && (
+          <>
+            <p className="text-slate-400 text-sm mb-6">Welcome back — enter the password you set.</p>
+            <Field label="Password">
+              <PasswordInput placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
+            </Field>
+            {error && <p className="text-rose-400 text-sm mb-4">{error}</p>}
+            <Button className="w-full" onClick={() => onPasswordLogin(voter, password)}>Log In</Button>
+            <button onClick={backToMatric} className="text-slate-500 hover:text-slate-300 text-sm mt-4 block mx-auto">← Use a different matric number</button>
+          </>
+        )}
+
+        {step === "legacy-password" && voter && (
+          <>
+            <p className="text-slate-400 text-sm mb-6">No email is on file for this matric number yet — use the password given to you by the Electoral Commission.</p>
+            <Field label="Password">
+              <PasswordInput placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
+            </Field>
+            {error && <p className="text-rose-400 text-sm mb-4">{error}</p>}
+            <Button className="w-full" onClick={() => onLegacyLogin(voter.matric, password)}>Log In</Button>
+            <button onClick={backToMatric} className="text-slate-500 hover:text-slate-300 text-sm mt-4 block mx-auto">← Use a different matric number</button>
+          </>
+        )}
+
+        {step === "matric" && (
+          <button onClick={onBack} className="text-slate-500 hover:text-slate-300 text-sm mt-4 block mx-auto">← Back</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Set Password (after clicking the email link) ----------
+function SetPasswordScreen({ onSubmit, error }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [localError, setLocalError] = useState("");
+
+  function handleSubmit() {
+    setLocalError("");
+    if (password.length < 6) {
+      setLocalError("Password must be at least 6 characters.");
+      return;
+    }
+    if (password !== confirm) {
+      setLocalError("Passwords don't match.");
+      return;
+    }
+    onSubmit(password);
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-6">
+      <div className="max-w-sm w-full bg-[#121A2B] border border-slate-800 rounded-xl p-7">
+        <h2 className="text-xl font-bold mb-1 flex items-center gap-2"><Check size={18} className="text-emerald-400" /> Email verified</h2>
+        <p className="text-slate-400 text-sm mb-6">Set a password you'll use to log in and vote from now on.</p>
+        <Field label="New Password">
+          <PasswordInput placeholder="At least 6 characters" value={password} onChange={(e) => setPassword(e.target.value)} />
         </Field>
-        <Field label="Password">
-          <PasswordInput placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
+        <Field label="Confirm Password">
+          <PasswordInput placeholder="Retype your password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
         </Field>
-        {error && <p className="text-rose-400 text-sm mb-4">{error}</p>}
-        <Button className="w-full" onClick={() => onSubmit(matric, password)}>Log In</Button>
-        <button onClick={onBack} className="text-slate-500 hover:text-slate-300 text-sm mt-4 block mx-auto">← Back</button>
+        {(localError || error) && <p className="text-rose-400 text-sm mb-4">{localError || error}</p>}
+        <Button className="w-full" onClick={handleSubmit}>Set Password & Continue</Button>
       </div>
     </div>
   );
@@ -856,8 +1068,7 @@ function CandidatesTab({ candidates, setCandidates }) {
     if (!post.trim() || !name.trim()) return;
     const c = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, post: post.trim(), name: name.trim(), image };
     persist([...candidates, c]);
-    setPost(""); setName(""); setImage(""); setImageError("");
-  }
+    setPost(""); setName(""); setImage(""); setImageError("");  }
 
   function removeCandidate(id) {
     persist(candidates.filter((c) => c.id !== id));
@@ -948,7 +1159,6 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
   }
 
   function applyBulk() {
-    // format per line: MATRIC,NAME,PASSWORD  (password optional -> keeps matric as password)
     const lines = bulk.split("\n").map((l) => l.trim()).filter(Boolean);
     const map = {};
     lines.forEach((line) => {
@@ -973,7 +1183,7 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
   function importEmails() {
     const validMatrics = new Set(voters.map((v) => v.matric));
     const lines = emailImportText.split("\n").map((l) => l.trim()).filter(Boolean);
-    const emailMap = {}; // matric -> email, last occurrence wins
+    const emailMap = {};
     const unmatched = [];
     let duplicateOverwrites = 0;
 
@@ -1000,13 +1210,17 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
   const registeredCount = voters.length;
   const namedCount = voters.filter((v) => v.hasSetName).length;
   const emailCount = voters.filter((v) => v.email).length;
+  const setupCompleteCount = voters.filter((v) => v.registered).length;
 
   return (
     <div>
-      <div className="grid grid-cols-3 gap-3 mb-6">
+      <div className="grid grid-cols-2 gap-3 mb-3">
         <Stat label="Registered Matric Numbers" value={registeredCount} />
         <Stat label="Names Assigned" value={namedCount} />
+      </div>
+      <div className="grid grid-cols-2 gap-3 mb-6">
         <Stat label="Emails Collected" value={`${emailCount}/${registeredCount}`} />
+        <Stat label="Password Set Up" value={`${setupCompleteCount}/${emailCount}`} />
       </div>
 
       <div className="bg-[#121A2B] border border-slate-800 rounded-xl p-5 mb-6">
@@ -1046,9 +1260,9 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
       </div>
 
       <div className="bg-[#121A2B] border border-slate-800 rounded-xl p-5 mb-6">
-        <h3 className="font-semibold mb-2">Bulk set names / passwords</h3>
+        <h3 className="font-semibold mb-2">Bulk set names / passwords (voters with no email only)</h3>
         <p className="text-slate-400 text-sm mb-3">
-          One voter per line: <span className="font-mono text-cyan-300">MATRIC,NAME,PASSWORD</span> — password is optional; if left out, it defaults to the voter's surname (or their matric number if no name is on record).
+          One voter per line: <span className="font-mono text-cyan-300">MATRIC,NAME,PASSWORD</span> — password is optional; if left out, it defaults to the voter's surname (or their matric number if no name is on record). Note: this password only applies to voters with no email on file — everyone else now logs in with the password they set themselves after verifying their email.
         </p>
         <textarea
           value={bulk}
@@ -1069,6 +1283,7 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
                 <th className="text-left px-4 py-2 font-mono">Matric</th>
                 <th className="text-left px-4 py-2">Name</th>
                 <th className="text-left px-4 py-2">Email</th>
+                <th className="text-left px-4 py-2">Setup</th>
                 <th className="text-left px-4 py-2">Votes</th>
               </tr>
             </thead>
@@ -1080,6 +1295,13 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
                     <td className="px-4 py-2 font-mono text-cyan-300/90">{v.matric}</td>
                     <td className="px-4 py-2 text-slate-300">{v.name || <span className="text-slate-600">— not set —</span>}</td>
                     <td className="px-4 py-2 text-slate-500 text-xs">{v.email || <span className="text-slate-600">— none —</span>}</td>
+                    <td className="px-4 py-2 text-xs">
+                      {v.email ? (
+                        v.registered ? <span className="text-emerald-400">Ready</span> : <span className="text-amber-400">Pending</span>
+                      ) : (
+                        <span className="text-slate-600">—</span>
+                      )}
+                    </td>
                     <td className="px-4 py-2">
                       {voteCount > 0 ? (
                         <button
