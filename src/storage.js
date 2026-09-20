@@ -2,11 +2,11 @@ import { initializeApp } from "firebase/app";
 import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
 import {
   getAuth,
-  sendSignInLinkToEmail,
-  isSignInWithEmailLink,
-  signInWithEmailLink,
+  createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
+  verifyPasswordResetCode,
+  confirmPasswordReset,
   signInWithEmailAndPassword,
-  updatePassword,
   signOut,
 } from "firebase/auth";
 import { firebaseConfig } from "./firebaseConfig.js";
@@ -38,42 +38,45 @@ export async function storageSet(key, value, _shared) {
 }
 
 // ---------- Voter email-verification + password auth ----------
-const EMAIL_KEY = "nacos_email_for_signin";
+// Uses Firebase's "password reset" email, which has a far higher free-plan
+// quota (150/day) than "email link sign-in" (5/day). The account is created
+// with a random, never-shown password; the voter sets their real one by
+// following the reset link.
 const MATRIC_KEY = "nacos_matric_for_signin";
 
-// Sends a one-time verification link to the voter's email on file. Clicking it
-// brings them back to the app so they can set their own password.
-export async function sendVoterSignInLink(email, matric) {
-  const actionCodeSettings = {
-    url: window.location.origin + "/",
-    handleCodeInApp: true,
-  };
-  await sendSignInLinkToEmail(auth, email, actionCodeSettings);
-  window.localStorage.setItem(EMAIL_KEY, email);
+export async function requestVoterRegistration(email, matric) {
+  try {
+    const tempPassword = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    await createUserWithEmailAndPassword(auth, email, tempPassword);
+    await signOut(auth); // don't leave this device signed in as the voter yet
+  } catch (e) {
+    if (e.code !== "auth/email-already-in-use") {
+      throw e;
+    }
+    // Account already exists (e.g. they requested a link before) — that's fine,
+    // just send them a fresh reset link below.
+  }
+  await sendPasswordResetEmail(auth, email);
   window.localStorage.setItem(MATRIC_KEY, matric);
 }
 
-// True when the current page URL is a Firebase email-link sign-in link.
-export function isEmailSignInLink() {
-  return isSignInWithEmailLink(auth, window.location.href);
+// Detects a Firebase password-reset link in the current page URL.
+export function getPasswordResetCode() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("mode") === "resetPassword" && params.get("oobCode")) {
+    return params.get("oobCode");
+  }
+  return null;
 }
 
-// Completes the email-link sign-in and returns the matric number that
-// requested it, so the app knows which voter record to attach the password to.
-export async function completeEmailSignIn() {
-  const email = window.localStorage.getItem(EMAIL_KEY);
-  const matric = window.localStorage.getItem(MATRIC_KEY);
-  if (!email) throw new Error("missing-email-for-signin");
-  const result = await signInWithEmailLink(auth, email, window.location.href);
-  window.localStorage.removeItem(EMAIL_KEY);
-  window.localStorage.removeItem(MATRIC_KEY);
-  return { user: result.user, matric, email };
+// Confirms the code is valid and returns the email it belongs to — this works
+// even if the link is opened on a different device than it was requested on.
+export async function verifyResetCode(oobCode) {
+  return await verifyPasswordResetCode(auth, oobCode);
 }
 
-// Attaches a password to the just-verified account, for all future logins.
-export async function setVoterPassword(newPassword) {
-  if (!auth.currentUser) throw new Error("not-authenticated");
-  await updatePassword(auth.currentUser, newPassword);
+export async function confirmNewPassword(oobCode, newPassword) {
+  await confirmPasswordReset(auth, oobCode, newPassword);
 }
 
 // Normal returning-voter login once a password has been set.
