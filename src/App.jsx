@@ -1140,26 +1140,53 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
     setBulk("");
   }
 
-  function importEmails() {
+    function importEmails() {
     const validMatrics = new Set(voters.map((v) => v.matric));
     const lines = emailImportText.split("\n").map((l) => l.trim()).filter(Boolean);
     const emailMap = {};
     const unmatched = [];
     let duplicateOverwrites = 0;
 
-    lines.forEach((line) => {
-      const parts = (line.includes("\t") ? line.split("\t") : line.split(",")).map((p) => p.trim()).filter(Boolean);
-      const emailField = parts.find((p) => p.includes("@"));
-      const matricField = parts.find((p) => p !== emailField && !/GMT/i.test(p) && /CS|FPA/i.test(p));
-      if (!emailField || !matricField) return;
-      const candidate = reconstructMatric(matricField);
+    function tryPair(matricRaw, email) {
+      const candidate = reconstructMatric(matricRaw);
       if (candidate && validMatrics.has(candidate)) {
         if (emailMap[candidate]) duplicateOverwrites++;
-        emailMap[candidate] = emailField;
+        emailMap[candidate] = email;
       } else {
-        unmatched.push({ raw: matricField, email: emailField });
+        unmatched.push({ raw: matricRaw, email });
+      }
+    }
+
+    let pendingMatric = null;
+    let pendingEmail = null;
+
+    lines.forEach((line) => {
+      const parts = (line.includes("\t") ? line.split("\t") : line.split(",")).map((p) => p.trim()).filter(Boolean);
+      const emailInLine = parts.find((p) => p.includes("@"));
+      const matricInLine = parts.find((p) => p !== emailInLine && !/GMT/i.test(p) && /CS|FPA/i.test(p));
+
+      if (emailInLine && matricInLine && parts.length > 1) {
+        tryPair(matricInLine, emailInLine);
+        return;
+      }
+
+      if (line.includes("@")) {
+        if (pendingMatric) {
+          tryPair(pendingMatric, line);
+          pendingMatric = null;
+        } else {
+          pendingEmail = line;
+        }
+      } else if (/CS|FPA/i.test(line) && !/GMT/i.test(line)) {
+        if (pendingEmail) {
+          tryPair(line, pendingEmail);
+          pendingEmail = null;
+        } else {
+          pendingMatric = line;
+        }
       }
     });
+
 
     const updated = voters.map((v) => (emailMap[v.matric] ? { ...v, email: emailMap[v.matric] } : v));
     persist(updated);
