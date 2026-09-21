@@ -1028,5 +1028,261 @@ function CandidatesTab({ candidates, setCandidates }) {
     if (!post.trim() || !name.trim()) return;
     const c = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, post: post.trim(), name: name.trim(), image };
     persist([...candidates, c]);
-    setPost(""); setName(""); setImage(""); setImageError("");
-        
+    setPost(""); setName(""); setImage(""); setImageError("");  }
+
+  function removeCandidate(id) {
+    persist(candidates.filter((c) => c.id !== id));
+  }
+
+  return (
+    <div>
+      <div className="bg-[#121A2B] border border-slate-800 rounded-xl p-5 mb-6">
+        <h3 className="font-semibold mb-4">Add a Candidate</h3>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <Field label="Post / Category"><TextInput placeholder="President" value={post} onChange={(e) => setPost(e.target.value)} /></Field>
+          <Field label="Candidate Name"><TextInput placeholder="Full name" value={name} onChange={(e) => setName(e.target.value)} /></Field>
+        </div>
+        <Field label="Photo">
+          <label className="flex items-center gap-2 border border-slate-700 border-dashed rounded-md px-3 py-2.5 text-slate-400 cursor-pointer hover:border-cyan-400">
+            <Upload size={16} /> {image ? "Photo selected" : "Upload image"}
+            <input type="file" accept="image/*" className="hidden" onChange={handleImage} />
+          </label>
+          <p className="text-xs text-slate-500 mt-1.5">Max 3MB. Use a clear, well-lit photo — it's shown large on the ballot.</p>
+          {imageError && <p className="text-rose-400 text-xs mt-1.5">{imageError}</p>}
+        </Field>
+        <Button className="flex items-center gap-1.5" onClick={addCandidate}><Plus size={16} /> Add Candidate</Button>
+      </div>
+
+      <div className="space-y-2">
+        {candidates.map((c) => (
+          <div key={c.id} className="flex items-center justify-between bg-[#121A2B] border border-slate-800 rounded-lg px-4 py-3">
+            <div className="flex items-center gap-3">
+              {c.image ? <img src={c.image} className="w-9 h-9 rounded object-cover" /> : <User size={20} className="text-slate-600" />}
+              <div>
+                <div className="font-medium text-sm">{c.name}</div>
+                <div className="text-xs text-slate-400">{c.post}</div>
+              </div>
+            </div>
+            <button onClick={() => removeCandidate(c.id)} className="text-slate-500 hover:text-rose-400"><Trash2 size={16} /></button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Tries to fix common matric-number typos (missing hyphen, double slashes, CS/CA typo,
+// stray underscores) and reconstructs a canonical matric number. Returns null if the
+// year segment can't be confidently identified (never guesses between 24 and 25).
+function reconstructMatric(raw) {
+  let s = raw.toUpperCase().trim();
+  s = s.replace(/[–—_]/g, "-");
+  s = s.replace(/\s+/g, "");
+  s = s.replace(/\/{2,}/g, "/");
+  const numMatch = s.match(/(\d{4})$/);
+  if (!numMatch) return null;
+  let yearMatch = s.match(/CS\/?(\d{2})/);
+  if (!yearMatch || (yearMatch[1] !== "24" && yearMatch[1] !== "25")) {
+    yearMatch = s.match(/\/(\d{2})\//);
+  }
+  if (!yearMatch || (yearMatch[1] !== "24" && yearMatch[1] !== "25")) return null;
+  return `FPA/CS/${yearMatch[1]}/1-${numMatch[1]}`;
+}
+
+function VotersTab({ voters, setVoters, ballot, setBallot }) {
+  const [bulk, setBulk] = useState("");
+  const [status, setStatus] = useState("");
+  const [emailImportText, setEmailImportText] = useState("");
+  const [emailImportReport, setEmailImportReport] = useState(null);
+
+  async function persist(next) {
+    setVoters(next);
+    await storageSet("voters", next, true);
+  }
+
+  async function clearVoterVotes(matric) {
+    if (!window.confirm(`Clear all recorded votes for ${matric}? They will be able to vote again from scratch.`)) return;
+    const fresh = (await storageGet("ballot", true)) || ballot;
+    const theirChoices = fresh.records[matric] || {};
+    const votes = { ...fresh.votes };
+    Object.entries(theirChoices).forEach(([candidateId, choice]) => {
+      const cv = votes[candidateId];
+      if (cv) {
+        votes[candidateId] = { ...cv, [choice]: Math.max(0, (cv[choice] || 0) - 1) };
+      }
+    });
+    const records = { ...fresh.records };
+    delete records[matric];
+    const updated = { votes, records };
+    setBallot(updated);
+    await storageSet("ballot", updated, true);
+  }
+
+  function applyBulk() {
+    const lines = bulk.split("\n").map((l) => l.trim()).filter(Boolean);
+    const map = {};
+    lines.forEach((line) => {
+      const [matric, name, password] = line.split(",").map((s) => s?.trim());
+      if (matric) map[matric.toUpperCase()] = { name, password };
+    });
+    const updated = voters.map((v) => {
+      const edit = map[v.matric.toUpperCase()];
+      if (!edit) return v;
+      return {
+        ...v,
+        name: edit.name || v.name,
+        password: edit.password || v.password,
+        hasSetName: !!edit.name,
+      };
+    });
+    persist(updated);
+    setStatus(`Updated ${Object.keys(map).length} voter record(s).`);
+    setBulk("");
+  }
+
+  function importEmails() {
+    const validMatrics = new Set(voters.map((v) => v.matric));
+    const lines = emailImportText.split("\n").map((l) => l.trim()).filter(Boolean);
+    const emailMap = {};
+    const unmatched = [];
+    let duplicateOverwrites = 0;
+
+    lines.forEach((line) => {
+      const parts = (line.includes("\t") ? line.split("\t") : line.split(",")).map((p) => p.trim()).filter(Boolean);
+      const emailField = parts.find((p) => p.includes("@"));
+      const matricField = parts.find((p) => p !== emailField && !/GMT/i.test(p) && /CS|FPA/i.test(p));
+      if (!emailField || !matricField) return;
+      const candidate = reconstructMatric(matricField);
+      if (candidate && validMatrics.has(candidate)) {
+        if (emailMap[candidate]) duplicateOverwrites++;
+        emailMap[candidate] = emailField;
+      } else {
+        unmatched.push({ raw: matricField, email: emailField });
+      }
+    });
+
+    const updated = voters.map((v) => (emailMap[v.matric] ? { ...v, email: emailMap[v.matric] } : v));
+    persist(updated);
+    setEmailImportReport({ matched: Object.keys(emailMap).length, unmatched, duplicateOverwrites });
+    setEmailImportText("");
+  }
+
+  const registeredCount = voters.length;
+  const namedCount = voters.filter((v) => v.hasSetName).length;
+  const emailCount = voters.filter((v) => v.email).length;
+  const setupCompleteCount = voters.filter((v) => v.registered).length;
+
+  return (
+    <div>
+      <div className="grid grid-cols-2 gap-3 mb-3">
+        <Stat label="Registered Matric Numbers" value={registeredCount} />
+        <Stat label="Names Assigned" value={namedCount} />
+      </div>
+      <div className="grid grid-cols-2 gap-3 mb-6">
+        <Stat label="Emails Collected" value={`${emailCount}/${registeredCount}`} />
+        <Stat label="Password Set Up" value={`${setupCompleteCount}/${emailCount}`} />
+      </div>
+
+      <div className="bg-[#121A2B] border border-slate-800 rounded-xl p-5 mb-6">
+        <h3 className="font-semibold mb-2 flex items-center gap-1.5"><Mail size={16} className="text-cyan-400" /> Import Voter Emails</h3>
+        <p className="text-slate-400 text-sm mb-3">
+          Paste rows copied straight from your Google Form response sheet (any column order — Timestamp, Matric Number, Email all fine). Common formatting typos in the matric number are corrected automatically; anything too ambiguous to fix safely is flagged below instead of guessed.
+        </p>
+        <textarea
+          value={emailImportText}
+          onChange={(e) => setEmailImportText(e.target.value)}
+          rows={6}
+          placeholder={"FPA/CS/24/1-0016\tsimonenoch02@gmail.com\nFPA/CS/25/1-0101\taderibigbebolarinwa@gmail.com"}
+          className="w-full bg-[#0B1220] border border-slate-700 focus:border-cyan-400 outline-none rounded-md px-3 py-2.5 text-slate-100 font-mono text-sm mb-3"
+        />
+        <Button onClick={importEmails}>Import</Button>
+
+        {emailImportReport && (
+          <div className="mt-4 text-sm">
+            <p className="text-emerald-400 mb-1">
+              Matched and saved {emailImportReport.matched} email(s).
+              {emailImportReport.duplicateOverwrites > 0 && ` (${emailImportReport.duplicateOverwrites} duplicate submission(s) resolved — kept the most recent.)`}
+            </p>
+            {emailImportReport.unmatched.length > 0 && (
+              <div className="mt-3 bg-amber-500/10 border border-amber-500/30 rounded-md p-3">
+                <p className="text-amber-300 font-medium mb-2">
+                  {emailImportReport.unmatched.length} row(s) couldn't be matched automatically — fix these manually and re-paste just these lines:
+                </p>
+                <div className="space-y-1 font-mono text-xs text-amber-200/90 max-h-40 overflow-y-auto">
+                  {emailImportReport.unmatched.map((u, i) => (
+                    <div key={i}>{u.raw} — {u.email}</div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="bg-[#121A2B] border border-slate-800 rounded-xl p-5 mb-6">
+        <h3 className="font-semibold mb-2">Bulk set names / passwords (voters with no email only)</h3>
+        <p className="text-slate-400 text-sm mb-3">
+          One voter per line: <span className="font-mono text-cyan-300">MATRIC,NAME,PASSWORD</span> — password is optional; if left out, it defaults to the voter's surname (or their matric number if no name is on record). Note: this password only applies to voters with no email on file — everyone else now logs in with the password they set themselves after verifying their email.
+        </p>
+        <textarea
+          value={bulk}
+          onChange={(e) => setBulk(e.target.value)}
+          rows={5}
+          placeholder={"FPA/CS/24/1-0001,Ada Lovelace,mypassword123\nFPA/CS/24/1-0002,Grace Hopper"}
+          className="w-full bg-[#0B1220] border border-slate-700 focus:border-cyan-400 outline-none rounded-md px-3 py-2.5 text-slate-100 font-mono text-sm mb-3"
+        />
+        <Button onClick={applyBulk}>Apply</Button>
+        {status && <p className="text-emerald-400 text-sm mt-3">{status}</p>}
+      </div>
+
+      <div className="bg-[#121A2B] border border-slate-800 rounded-xl overflow-hidden">
+        <div className="max-h-80 overflow-y-auto">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-[#0f1626] text-slate-400 text-xs uppercase tracking-wider">
+              <tr>
+                <th className="text-left px-4 py-2 font-mono">Matric</th>
+                <th className="text-left px-4 py-2">Name</th>
+                <th className="text-left px-4 py-2">Email</th>
+                <th className="text-left px-4 py-2">Setup</th>
+                <th className="text-left px-4 py-2">Votes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {voters.map((v) => {
+                const voteCount = Object.keys(ballot.records[v.matric] || {}).length;
+                return (
+                  <tr key={v.matric} className="border-t border-slate-800/60">
+                    <td className="px-4 py-2 font-mono text-cyan-300/90">{v.matric}</td>
+                    <td className="px-4 py-2 text-slate-300">{v.name || <span className="text-slate-600">— not set —</span>}</td>
+                    <td className="px-4 py-2 text-slate-500 text-xs">{v.email || <span className="text-slate-600">— none —</span>}</td>
+                    <td className="px-4 py-2 text-xs">
+                      {v.email ? (
+                        v.registered ? <span className="text-emerald-400">Ready</span> : <span className="text-amber-400">Pending</span>
+                      ) : (
+                        <span className="text-slate-600">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2">
+                      {voteCount > 0 ? (
+                        <button
+                          onClick={() => clearVoterVotes(v.matric)}
+                          className="text-rose-400 hover:text-rose-300 text-xs flex items-center gap-1"
+                          title="Clear this voter's votes"
+                        >
+                          <RefreshCw size={12} /> {voteCount} cast
+                        </button>
+                      ) : (
+                        <span className="text-slate-600 text-xs">—</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+    
