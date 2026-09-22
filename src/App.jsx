@@ -381,32 +381,34 @@ export default function App() {
     }
   }
 
-  async function handleSetPassword(newPassword) {
+   async function handleSetPassword(newPassword) {
     if (!pendingSetup) return;
     setError("");
     try {
       await confirmNewPassword(pendingSetup.oobCode, newPassword);
       await voterPasswordLogin(pendingSetup.email, newPassword);
       const freshVoters = (await storageGet("voters", true)) || voters;
+      const targetEmail = pendingSetup.email.trim().toLowerCase();
       const updated = freshVoters.map((v) =>
-        v.email === pendingSetup.email ? { ...v, registered: true } : v
+        v.email && v.email.trim().toLowerCase() === targetEmail ? { ...v, registered: true } : v
       );
       setVoters(updated);
       await storageSet("voters", updated, true);
-      const voter = updated.find((v) => v.email === pendingSetup.email);
+      const voter = updated.find((v) => v.email && v.email.trim().toLowerCase() === targetEmail);
       setPendingSetup(null);
       if (voter) {
         setCurrentVoter(voter);
         setScreen("vote");
         saveSession({ type: "voter", matric: voter.matric, lastActivity: Date.now() });
       } else {
-        setError("Your password was set, but we couldn't match your email to a matric number. Please contact the Electoral Commission.");
+        setSessionNotice("Your password was set, but we couldn't match your email to a matric number. Please contact the Electoral Commission.");
         setScreen("landing");
       }
     } catch (e) {
       setError("Could not set your password. Please try requesting a new verification link.");
     }
   }
+
 
   async function castVote(candidateId, choice) {
     if (!currentVoter) return;
