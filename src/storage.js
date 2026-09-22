@@ -1,11 +1,5 @@
 import { initializeApp } from "firebase/app";
-import {
-  getFirestore,
-  doc,
-  getDoc,
-  setDoc,
-} from "firebase/firestore";
-
+import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
 import {
   getAuth,
   createUserWithEmailAndPassword,
@@ -15,284 +9,84 @@ import {
   signInWithEmailAndPassword,
   signOut,
 } from "firebase/auth";
-
 import { firebaseConfig } from "./firebaseConfig.js";
 
-
-// ======================================================
-// FIREBASE INITIALIZATION
-// ======================================================
-
 const app = initializeApp(firebaseConfig);
-
 const db = getFirestore(app);
-
 export const auth = getAuth(app);
-
 const COLLECTION = "nacosElection";
 
-
-// ======================================================
-// HELPER FUNCTIONS
-// ======================================================
-
-function normalizeEmail(email) {
-  return String(email || "").trim().toLowerCase();
-}
-
-
-// ======================================================
-// FIRESTORE DATA STORAGE
-// ======================================================
-
+// ---------- Firestore data storage (voters, candidates, ballot, electionStatus) ----------
 export async function storageGet(key, _shared) {
   try {
-    const snap = await getDoc(
-      doc(db, COLLECTION, key)
-    );
-
-    if (!snap.exists()) {
-      return null;
-    }
-
-    return snap.data().payload ?? null;
-
+    const snap = await getDoc(doc(db, COLLECTION, key));
+    return snap.exists() ? snap.data().payload : null;
   } catch (e) {
-    console.error("Firestore storageGet failed:", e);
+    console.error("storage get failed", e);
     return null;
   }
 }
 
-
 export async function storageSet(key, value, _shared) {
   try {
-    await setDoc(
-      doc(db, COLLECTION, key),
-      {
-        payload: value,
-      }
-    );
-
+    await setDoc(doc(db, COLLECTION, key), { payload: value });
     return true;
-
   } catch (e) {
-    console.error("Firestore storageSet failed:", e);
+    console.error("storage set failed", e);
     return false;
   }
 }
 
-
-// ======================================================
-// VOTER EMAIL + PASSWORD AUTHENTICATION
-// ======================================================
-//
-// We use Firebase Password Reset emails as the verification
-// mechanism.
-//
-// Flow:
-//
-// 1. Student enters matric number.
-// 2. App finds their registered email.
-// 3. Firebase account is created if necessary.
-// 4. Firebase sends password-reset email.
-// 5. Student opens the link.
-// 6. Student creates their own password.
-// 7. App marks the voter as registered.
-// 8. Student can now log in normally with:
-//       Matric Number + Password
-//
-// ======================================================
-
+// ---------- Voter email-verification + password auth ----------
+// Uses Firebase's "password reset" email, which has a far higher free-plan
+// quota (150/day) than "email link sign-in" (5/day). The account is created
+// with a random, never-shown password; the voter sets their real one by
+// following the reset link.
 const MATRIC_KEY = "nacos_matric_for_signin";
 
-
-// ======================================================
-// REQUEST FIRST-TIME VOTER PASSWORD SETUP
-// ======================================================
-
 export async function requestVoterRegistration(email, matric) {
-
-  const cleanEmail = normalizeEmail(email);
-
-  if (!cleanEmail) {
-    throw new Error("A valid email address is required.");
-  }
-
   try {
-
-    const tempPassword =
-      Math.random().toString(36).slice(2) +
-      Date.now().toString(36) +
-      Math.random().toString(36).slice(2);
-
-    await createUserWithEmailAndPassword(
-      auth,
-      cleanEmail,
-      tempPassword
-    );
-
-    // Make sure the newly-created voter account is not
-    // left signed in on this device.
-    await signOut(auth);
-
+    const tempPassword = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    await createUserWithEmailAndPassword(auth, email, tempPassword);
+    await signOut(auth); // don't leave this device signed in as the voter yet
   } catch (e) {
-
-    // If the Firebase account already exists, we don't
-    // need to create it again.
-    //
-    // We can simply send another password-reset email.
-
     if (e.code !== "auth/email-already-in-use") {
-      console.error(
-        "Could not create voter Firebase account:",
-        e
-      );
-
       throw e;
     }
+    // Account already exists (e.g. they requested a link before) — that's fine,
+    // just send them a fresh reset link below.
   }
-
-
-  // Send the password setup/reset email.
-  await sendPasswordResetEmail(
-    auth,
-    cleanEmail
-  );
-
-
-  // Save matric number locally in case it is needed
-  // after the email link is opened.
-  window.localStorage.setItem(
-    MATRIC_KEY,
-    String(matric || "").trim().toUpperCase()
-  );
+  await sendPasswordResetEmail(auth, email);
+  window.localStorage.setItem(MATRIC_KEY, matric);
 }
 
-
-// ======================================================
-// DETECT FIREBASE PASSWORD RESET LINK
-// ======================================================
-
+// Detects a Firebase password-reset link in the current page URL.
 export function getPasswordResetCode() {
-
-  const params = new URLSearchParams(
-    window.location.search
-  );
-
-  const mode = params.get("mode");
-
-  const oobCode = params.get("oobCode");
-
-  if (
-    mode === "resetPassword" &&
-    oobCode
-  ) {
-    return oobCode;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("mode") === "resetPassword" && params.get("oobCode")) {
+    return params.get("oobCode");
   }
-
   return null;
 }
 
-
-// ======================================================
-// VERIFY PASSWORD RESET CODE
-// ======================================================
-//
-// Firebase returns the email address connected to the
-// reset link.
-//
-// ======================================================
-
+// Confirms the code is valid and returns the email it belongs to — this works
+// even if the link is opened on a different device than it was requested on.
 export async function verifyResetCode(oobCode) {
-
-  if (!oobCode) {
-    throw new Error("Missing password reset code.");
-  }
-
-  const email = await verifyPasswordResetCode(
-    auth,
-    oobCode
-  );
-
-  return normalizeEmail(email);
+  return await verifyPasswordResetCode(auth, oobCode);
 }
 
-
-// ======================================================
-// CONFIRM NEW PASSWORD
-// ======================================================
-
-export async function confirmNewPassword(
-  oobCode,
-  newPassword
-) {
-
-  if (!oobCode) {
-    throw new Error("Missing password reset code.");
-  }
-
-  if (!newPassword || newPassword.length < 6) {
-    throw new Error(
-      "Password must contain at least 6 characters."
-    );
-  }
-
-  await confirmPasswordReset(
-    auth,
-    oobCode,
-    newPassword
-  );
-
-  return true;
+export async function confirmNewPassword(oobCode, newPassword) {
+  await confirmPasswordReset(auth, oobCode, newPassword);
 }
 
-
-// ======================================================
-// NORMAL VOTER LOGIN
-// ======================================================
-
-export async function voterPasswordLogin(
-  email,
-  password
-) {
-
-  const cleanEmail = normalizeEmail(email);
-
-  if (!cleanEmail) {
-    throw new Error("Invalid email address.");
-  }
-
-  if (!password) {
-    throw new Error("Password is required.");
-  }
-
-  const result =
-    await signInWithEmailAndPassword(
-      auth,
-      cleanEmail,
-      password
-    );
-
+// Normal returning-voter login once a password has been set.
+export async function voterPasswordLogin(email, password) {
+  const result = await signInWithEmailAndPassword(auth, email, password);
   return result.user;
 }
 
-
-// ======================================================
-// VOTER SIGN OUT
-// ======================================================
-
 export async function voterSignOut() {
-
   try {
-
     await signOut(auth);
-
-  } catch (e) {
-
-    console.error(
-      "Voter sign out failed:",
-      e
-    );
-
-  }
+  } catch (e) {}
 }
