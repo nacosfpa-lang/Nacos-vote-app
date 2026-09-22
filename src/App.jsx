@@ -935,195 +935,175 @@ export default function App() {
   // FIRST PASSWORD SETUP
   // ===================================================
 
-  async function handleSetPassword(
-    newPassword
-  ) {
-    if (!pendingSetup) {
-      return;
-    }
+async function handleSetPassword(newPassword) {
+  if (!pendingSetup) return;
 
-    setError("");
+  setError("");
 
-    try {
+  try {
+    // --------------------------------------------
+    // 1. Confirm the Firebase password reset
+    // --------------------------------------------
 
-      // -----------------------------------------------
-      // 1. Confirm Firebase reset code
-      // -----------------------------------------------
-
-      await confirmNewPassword(
-        pendingSetup.oobCode,
-        newPassword
-      );
+    await confirmNewPassword(
+      pendingSetup.oobCode,
+      newPassword
+    );
 
 
-      // -----------------------------------------------
-      // 2. Immediately login with the new password
-      // -----------------------------------------------
+    // --------------------------------------------
+    // 2. Log the voter in using the new password
+    // --------------------------------------------
 
-      const email = normalizeEmail(
-        pendingSetup.email
-      );
-
-      await voterPasswordLogin(
-        email,
-        newPassword
-      );
+    await voterPasswordLogin(
+      pendingSetup.email,
+      newPassword
+    );
 
 
-      // -----------------------------------------------
-      // 3. Get latest voters from Firestore
-      // -----------------------------------------------
+    // --------------------------------------------
+    // 3. Get the latest voters from Firestore
+    // --------------------------------------------
 
-      const freshVoters =
-        (await storageGet(
-          "voters",
-          true
-        )) || voters;
+    const freshVoters =
+      (await storageGet("voters", true)) || voters;
 
 
-      // -----------------------------------------------
-      // 4. Find voter using normalized email
-      // -----------------------------------------------
+    // --------------------------------------------
+    // 4. Normalize the Firebase email
+    // --------------------------------------------
 
-      const voterIndex =
-        freshVoters.findIndex(
-          (v) =>
-            normalizeEmail(
-              v.email
-            ) === email
-        );
+    const verifiedEmail =
+      String(pendingSetup.email || "")
+        .trim()
+        .toLowerCase();
 
 
-      // -----------------------------------------------
-      // 5. If no voter was found
-      // -----------------------------------------------
+    // --------------------------------------------
+    // 5. Mark the correct voter as registered
+    // --------------------------------------------
 
-      if (voterIndex === -1) {
+    const updated = freshVoters.map((v) => {
 
-        console.error(
-          "Could not match reset email to voter:",
-          email
-        );
+      const voterEmail =
+        String(v.email || "")
+          .trim()
+          .toLowerCase();
 
-        setPendingSetup(null);
-
-        setError(
-          "Your password was successfully set, but we couldn't match your email to a matric number. Please contact the Electoral Commission."
-        );
-
-        setScreen("landing");
-
-        return;
+      if (voterEmail === verifiedEmail) {
+        return {
+          ...v,
+          registered: true,
+        };
       }
 
-
-      // -----------------------------------------------
-      // 6. Update voter record
-      // -----------------------------------------------
-
-      const updated = [
-        ...freshVoters,
-      ];
-
-      updated[voterIndex] = {
-        ...updated[voterIndex],
-
-        email,
-
-        registered: true,
-
-        firebaseUid:
-          auth.currentUser?.uid ||
-          updated[voterIndex]
-            .firebaseUid ||
-          null,
-      };
+      return v;
+    });
 
 
-      // -----------------------------------------------
-      // 7. Save voter record to Firestore
-      // -----------------------------------------------
+    // --------------------------------------------
+    // 6. Make sure the voter was actually found
+    // --------------------------------------------
 
-      const saved =
-        await storageSet(
-          "voters",
-          updated,
-          true
-        );
+    const voter = updated.find((v) => {
 
-      if (!saved) {
-        throw new Error(
-          "Could not save updated voter record."
-        );
-      }
+      const voterEmail =
+        String(v.email || "")
+          .trim()
+          .toLowerCase();
+
+      return voterEmail === verifiedEmail;
+    });
 
 
-      // -----------------------------------------------
-      // 8. Update React state
-      // -----------------------------------------------
-
-      setVoters(updated);
-
-
-      // -----------------------------------------------
-      // 9. Get matched voter
-      // -----------------------------------------------
-
-      const voter =
-        updated[voterIndex];
-
-
-      // -----------------------------------------------
-      // 10. Clear setup state
-      // -----------------------------------------------
-
-      setPendingSetup(null);
-
-
-      // -----------------------------------------------
-      // 11. Remove reset parameters from URL
-      // -----------------------------------------------
-
-      try {
-        window.history.replaceState(
-          {},
-          document.title,
-          window.location.pathname
-        );
-      } catch (e) {
-        console.warn(
-          "Could not clean reset URL:",
-          e
-        );
-      }
-
-
-      // -----------------------------------------------
-      // 12. Log voter into voting screen
-      // -----------------------------------------------
-
-      setCurrentVoter(voter);
-
-      setScreen("vote");
-
-      saveSession({
-        type: "voter",
-        matric: voter.matric,
-        lastActivity: Date.now(),
-      });
-
-    } catch (e) {
+    if (!voter) {
 
       console.error(
-        "Password setup failed:",
-        e
+        "Voter matching failed.",
+        {
+          verifiedEmail,
+          voters: freshVoters,
+        }
       );
 
       setError(
-        "Could not set your password. Please request a new verification link."
+        "Your password was set successfully, but your voter record could not be matched. Please contact the Electoral Commission."
       );
+
+      return;
     }
+
+
+    // --------------------------------------------
+    // 7. Save the updated voter list to Firestore
+    // --------------------------------------------
+
+    const saved =
+      await storageSet(
+        "voters",
+        updated,
+        true
+      );
+
+
+    // IMPORTANT:
+    // If Firestore refuses the write, don't pretend
+    // that registration was completed.
+
+    if (!saved) {
+
+      setError(
+        "Your password was created, but your voter registration could not be saved. Please contact the Electoral Commission."
+      );
+
+      console.error(
+        "Firestore failed to save registered=true."
+      );
+
+      return;
+    }
+
+
+    // --------------------------------------------
+    // 8. Update React state
+    // --------------------------------------------
+
+    setVoters(updated);
+
+    setCurrentVoter(voter);
+
+    setPendingSetup(null);
+
+
+    // --------------------------------------------
+    // 9. Send the voter to the voting page
+    // --------------------------------------------
+
+    setScreen("vote");
+
+
+    // --------------------------------------------
+    // 10. Save login session
+    // --------------------------------------------
+
+    saveSession({
+      type: "voter",
+      matric: voter.matric,
+      lastActivity: Date.now(),
+    });
+
+  } catch (e) {
+
+    console.error(
+      "Password setup failed:",
+      e
+    );
+
+    setError(
+      "Could not set your password. Please request a new verification link."
+    );
   }
+}
 
 
   // ===================================================
