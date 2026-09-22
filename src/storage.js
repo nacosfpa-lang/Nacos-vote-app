@@ -56,9 +56,14 @@ export async function requestVoterRegistration(email, matric) {
     // Account already exists (e.g. they requested a link before) — that's fine,
     // just send them a fresh reset link below.
   }
-  await sendPasswordResetEmail(auth, email);
+  const actionCodeSettings = {
+    url: window.location.origin + "/",
+    handleCodeInApp: true,
+  };
+  await sendPasswordResetEmail(auth, email, actionCodeSettings);
   window.localStorage.setItem(MATRIC_KEY, matric);
 }
+
 
 // Detects a Firebase password-reset link in the current page URL.
 export function getPasswordResetCode() {
