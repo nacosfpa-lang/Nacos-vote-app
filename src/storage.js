@@ -63,6 +63,12 @@ export async function requestVoterRegistration(email, matric) {
   await sendPasswordResetEmail(auth, email, actionCodeSettings);
   window.localStorage.setItem(MATRIC_KEY, matric);
 }
+export function getStoredMatricForSignIn() {
+  return window.localStorage.getItem(MATRIC_KEY);
+}
+export function clearStoredMatricForSignIn() {
+  window.localStorage.removeItem(MATRIC_KEY);
+}
 
 
 // Detects a Firebase password-reset link in the current page URL.
