@@ -8,7 +8,10 @@ import {
   verifyResetCode,
   confirmNewPassword,
   voterPasswordLogin,
+  getStoredMatricForSignIn,
+  clearStoredMatricForSignIn,
 } from "./storage.js";
+
 
 // ---------- Constants ----------
 const ADMIN_PASSWORD = "Wickedsmile"; // change this before sharing the real link
