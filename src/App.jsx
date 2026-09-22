@@ -514,7 +514,9 @@ export default function App() {
       )}
     </div>
   );
-}// ---------- Landing ----------
+}
+
+// ---------- Landing ----------
 function Landing({ onVoter, onAdmin, notice }) {
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-6">
@@ -773,7 +775,52 @@ function VoteScreen({ voter, candidates, ballot, electionStatus, onVote, onLogou
                       lockedOut ? "border-slate-800 opacity-50" : "border-slate-700"
                     }`}
                   >
-                // ---------- Admin Dashboard ----------
+                    <div className="aspect-square bg-slate-800 flex items-center justify-center overflow-hidden">
+                      {c.image ? (
+                        <img src={c.image} alt={c.name} className="w-full h-full object-cover" />
+                      ) : (
+                        <User size={64} className="text-slate-600" />
+                      )}
+                    </div>
+                    <div className="p-4">
+                      <h3 className="font-bold text-2xl leading-tight text-white">{c.name}</h3>
+                      <p className="text-slate-400 text-sm mb-3">Contesting for {c.post}</p>
+                      {voted ? (
+                        <div className="flex items-center gap-1.5 text-emerald-400 text-sm font-medium">
+                          <Check size={16} /> Your vote
+                        </div>
+                      ) : isMulti ? (
+                        <Button
+                          variant="primary"
+                          className="w-full flex items-center justify-center gap-1.5 py-2"
+                          disabled={lockedOut}
+                          onClick={() => onVote(c.id, "yes")}
+                        >
+                          <Check size={16} /> {lockedOut ? "Already voted for this post" : "Vote for this candidate"}
+                        </Button>
+                      ) : (
+                        <div className="flex gap-2">
+                          <Button variant="yes" className="flex-1 flex items-center justify-center gap-1.5 py-2" onClick={() => onVote(c.id, "yes")}>
+                            <Check size={16} /> Yes
+                          </Button>
+                          <Button variant="no" className="flex-1 flex items-center justify-center gap-1.5 py-2" onClick={() => onVote(c.id, "no")}>
+                            <X size={16} /> No
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------- Admin Dashboard ----------
 function AdminDashboard({ voters, setVoters, candidates, setCandidates, ballot, setBallot, electionStatus, setElectionStatus, refreshAll, onLogout }) {
   const [tab, setTab] = useState("results"); // results | candidates | voters
 
@@ -1028,7 +1075,8 @@ function CandidatesTab({ candidates, setCandidates }) {
     if (!post.trim() || !name.trim()) return;
     const c = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, post: post.trim(), name: name.trim(), image };
     persist([...candidates, c]);
-    setPost(""); setName(""); setImage(""); setImageError("");  }
+    setPost(""); setName(""); setImage(""); setImageError("");
+  }
 
   function removeCandidate(id) {
     persist(candidates.filter((c) => c.id !== id));
@@ -1140,7 +1188,7 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
     setBulk("");
   }
 
-    function importEmails() {
+  function importEmails() {
     const validMatrics = new Set(voters.map((v) => v.matric));
     const lines = emailImportText.split("\n").map((l) => l.trim()).filter(Boolean);
     const emailMap = {};
@@ -1186,7 +1234,6 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
         }
       }
     });
-
 
     const updated = voters.map((v) => (emailMap[v.matric] ? { ...v, email: emailMap[v.matric] } : v));
     persist(updated);
@@ -1312,4 +1359,3 @@ function VotersTab({ voters, setVoters, ballot, setBallot }) {
     </div>
   );
 }
-    
