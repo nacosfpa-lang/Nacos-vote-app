@@ -384,7 +384,7 @@ export default function App() {
     }
   }
 
-   async function handleSetPassword(newPassword) {
+     async function handleSetPassword(newPassword) {
     if (!pendingSetup) return;
     setError("");
     try {
@@ -392,18 +392,29 @@ export default function App() {
       await voterPasswordLogin(pendingSetup.email, newPassword);
       const freshVoters = (await storageGet("voters", true)) || voters;
       const targetEmail = pendingSetup.email.trim().toLowerCase();
-      const updated = freshVoters.map((v) =>
-        v.email && v.email.trim().toLowerCase() === targetEmail ? { ...v, registered: true } : v
-      );
-      setVoters(updated);
-      await storageSet("voters", updated, true);
-      const voter = updated.find((v) => v.email && v.email.trim().toLowerCase() === targetEmail);
-      setPendingSetup(null);
+      const storedMatric = getStoredMatricForSignIn();
+
+      let voter = null;
+      if (storedMatric) {
+        voter = freshVoters.find((v) => v.matric === storedMatric);
+      }
+      if (!voter) {
+        voter = freshVoters.find((v) => v.email && v.email.trim().toLowerCase() === targetEmail);
+      }
+
       if (voter) {
-        setCurrentVoter(voter);
+        const updated = freshVoters.map((v) =>
+          v.matric === voter.matric ? { ...v, registered: true } : v
+        );
+        setVoters(updated);
+        await storageSet("voters", updated, true);
+        clearStoredMatricForSignIn();
+        setPendingSetup(null);
+        setCurrentVoter({ ...voter, registered: true });
         setScreen("vote");
         saveSession({ type: "voter", matric: voter.matric, lastActivity: Date.now() });
       } else {
+        setPendingSetup(null);
         setSessionNotice("Your password was set, but we couldn't match your email to a matric number. Please contact the Electoral Commission.");
         setScreen("landing");
       }
@@ -411,6 +422,7 @@ export default function App() {
       setError("Could not set your password. Please try requesting a new verification link.");
     }
   }
+
 
 
   async function castVote(candidateId, choice) {
